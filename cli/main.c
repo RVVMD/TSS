@@ -20,6 +20,7 @@ static void usage(const char *prog)
         "  --t-step SEC    Output interval (default: 0.01)\n"
         "  --events FILE   Event script (INI format)\n"
         "  --output DIR    Output directory (default: ./results)\n"
+        "  --osc BUS       3-phase oscillogram for bus ID (1 kHz sampled)\n"
         "  --plot          Generate gnuplot PNGs\n"
         "  --help          Show this help\n", prog);
 }
@@ -38,7 +39,7 @@ int main(int argc, char **argv)
     const char *raw_file = NULL, *dyr_file = NULL, *events_file = NULL;
     const char *output_dir = "results";
     double t_end = 10.0, t_step = 0.01;
-    int do_plot = 0;
+    int do_plot = 0, osc_bus = -1;
 
     static struct option long_opts[] = {
         {"raw",    required_argument, 0, 'r'},
@@ -47,13 +48,14 @@ int main(int argc, char **argv)
         {"t-step", required_argument, 0, 's'},
         {"events", required_argument, 0, 'e'},
         {"output", required_argument, 0, 'o'},
+        {"osc",    required_argument, 0, 'O'},
         {"plot",   no_argument,       0, 'p'},
         {"help",   no_argument,       0, 'h'},
         {0,0,0,0}
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "r:d:T:s:e:o:ph", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "r:d:T:s:e:o:O:ph", long_opts, NULL)) != -1) {
         switch (opt) {
         case 'r': raw_file    = optarg; break;
         case 'd': dyr_file    = optarg; break;
@@ -61,6 +63,7 @@ int main(int argc, char **argv)
         case 's': t_step      = atof(optarg); break;
         case 'e': events_file = optarg; break;
         case 'o': output_dir  = optarg; break;
+        case 'O': osc_bus     = atoi(optarg); break;
         case 'p': do_plot     = 1; break;
         case 'h': usage(argv[0]); MPI_Finalize(); return 0;
         default:  usage(argv[0]); MPI_Finalize(); return 1;
@@ -129,9 +132,33 @@ int main(int argc, char **argv)
         fprintf(vfile, "\n");
     }
 
-    double t = 0.0, t_next = t_step;
+    /* oscillogram output */
+    FILE *ofile = NULL;
+    int osc_idx = -1;
+    if (osc_bus > 0) {
+        for (int i = 0; i < sys.nbus; i++)
+            if (sys.bus[i].id == osc_bus) { osc_idx = i; break; }
+        if (osc_idx >= 0) {
+            char oname[256];
+            snprintf(oname, sizeof(oname), "%s/osc_bus%d.csv", output_dir, osc_bus);
+            ofile = fopen(oname, "w");
+            if (ofile) fprintf(ofile, "time,Va,Vb,Vc\n");
+        } else {
+            log_warn("osc bus %d not found", osc_bus);
+        }
+    }
+
+    double t = 0.0, t_next = t_step, t_prev = 0.0;
+    double Vr_prev = 0, Vi_prev = 0;
     int step = 0, ev_idx = 0;
     int ndiff = dae.ndiff, neq = dae.neq;
+
+    /* capture initial V for osc interpolation */
+    if (osc_idx >= 0) {
+        double *y0 = N_VGetArrayPointer(itg.nvec_y);
+        Vr_prev = y0[ndiff + 2*osc_idx];
+        Vi_prev = y0[ndiff + 2*osc_idx + 1];
+    }
 
     log_info("Simulating: t_end=%.1f t_step=%.3f", t_end, t_step);
 
@@ -245,6 +272,27 @@ int main(int argc, char **argv)
                 }
                 fprintf(vfile, "\n");
             }
+
+            /* 3-phase oscillogram at 1 kHz */
+            if (ofile) {
+                double wr = 2.0 * M_PI * 60.0;
+                double Vr_n = y[ndiff + 2*osc_idx];
+                double Vi_n = y[ndiff + 2*osc_idx + 1];
+
+                double dt_osc = 0.001;
+                for (double ts = t_prev; ts < t - 1e-10; ts += dt_osc) {
+                    double alpha = (ts - t_prev) / (t - t_prev + 1e-20);
+                    double Vr = Vr_prev * (1.0 - alpha) + Vr_n * alpha;
+                    double Vi = Vi_prev * (1.0 - alpha) + Vi_n * alpha;
+                    double va = Vr * cos(wr * ts) - Vi * sin(wr * ts);
+                    double vb = Vr * cos(wr * ts - 2.0943951024) - Vi * sin(wr * ts - 2.0943951024);
+                    double vc = Vr * cos(wr * ts + 2.0943951024) - Vi * sin(wr * ts + 2.0943951024);
+                    fprintf(ofile, "%.6f,%.6f,%.6f,%.6f\n", ts, va, vb, vc);
+                }
+                Vr_prev = Vr_n;
+                Vi_prev = Vi_n;
+                t_prev = t;
+            }
         }
 
         step++;
@@ -258,6 +306,7 @@ int main(int argc, char **argv)
 
     if (dfile) fclose(dfile);
     if (vfile) fclose(vfile);
+    if (ofile) fclose(ofile);
 
     if (do_plot) {
         char buf[2048];
