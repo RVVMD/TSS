@@ -7,6 +7,7 @@
 #include <nvector/nvector_serial.h>
 #include <ida/ida.h>
 #include <getopt.h>
+#include <time.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 
@@ -30,6 +31,7 @@ static void usage(const char *prog)
         "  --output DIR      Output directory (default: ./results)\n"
         "  --osc BUS         3-phase oscillogram at 1 kHz\n"
         "  --plot            Generate gnuplot PNGs\n"
+        "  --res WxH         Plot resolution (default: 2400x1600)\n"
         "\n"
         "=== Inspection (no simulation) ===\n"
         "  --info            Print network topology report\n"
@@ -82,6 +84,7 @@ int main(int argc, char **argv)
     const char *output_dir = "results", *topo_file = NULL;
     double t_end = 10.0, t_step = 0.01;
     int do_plot = 0, osc_bus = -1, do_info = 0, do_diagram = 0;
+    int plot_w = 2400, plot_h = 1600;
 
     static struct option long_opts[] = {
         {"raw",    required_argument, 0, 'r'},
@@ -92,6 +95,7 @@ int main(int argc, char **argv)
         {"output", required_argument, 0, 'o'},
         {"osc",    required_argument, 0, 'O'},
         {"plot",   no_argument,       0, 'p'},
+        {"res",    required_argument, 0, 'R'},
         {"info",   no_argument,       0, 'I'},
         {"diagram",no_argument,       0, 'D'},
         {"topo",   required_argument, 0, 'G'},
@@ -100,7 +104,7 @@ int main(int argc, char **argv)
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "r:d:T:s:e:o:O:I:D:G:ph", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "r:d:T:s:e:o:O:R:I:D:G:ph", long_opts, NULL)) != -1) {
         switch (opt) {
         case 'r': raw_file    = optarg; break;
         case 'd': dyr_file    = optarg; break;
@@ -109,6 +113,7 @@ int main(int argc, char **argv)
         case 'e': events_file = optarg; break;
         case 'o': output_dir  = optarg; break;
         case 'O': osc_bus     = atoi(optarg); break;
+        case 'R': sscanf(optarg, "%dx%d", &plot_w, &plot_h); break;
         case 'I': do_info     = 1; break;
         case 'D': do_diagram  = 1; break;
         case 'G': topo_file   = optarg; break;
@@ -235,6 +240,7 @@ int main(int argc, char **argv)
     }
 
     log_info("Simulating: t_end=%.1f t_step=%.3f", t_end, t_step);
+    clock_t t_start = clock();
 
     while (t < t_end - 1e-10) {
         double tout = t_next;
@@ -430,8 +436,22 @@ int main(int argc, char **argv)
 
         step++;
         while (t_next <= t + 1e-10) t_next += t_step;
-        if (step % 200 == 0) log_info("t=%.3f/%.1f steps=%d", t, t_end, step);
+
+        /* real-time progress bar */
+        {
+            double pct = (t / t_end) * 100.0;
+            double elapsed = (double)(clock() - t_start) / CLOCKS_PER_SEC;
+            double eta = (pct > 0.01) ? elapsed * (100.0 / pct - 1.0) : 0;
+            int bar_w = 30, filled = (int)(pct * bar_w / 100.0);
+            fprintf(stderr, "\r[");
+            for (int b = 0; b < bar_w; b++) fputc(b < filled ? '=' : (b == filled ? '>' : ' '), stderr);
+            fprintf(stderr, "] %5.1f%% t=%.2fs elapsed=%.1fs ETA=%.1fs   ",
+                    pct, t, elapsed, eta);
+            fflush(stderr);
+        }
     }
+
+    fprintf(stderr, "\r[==============================] 100.0%%  Done: t=%.4f steps=%d\n\n", t, step);
 
     log_info("Done: t=%.4f steps=%d", t, step);
 
@@ -470,13 +490,13 @@ int main(int argc, char **argv)
         snprintf(buf, sizeof(buf), "%s/delta.gp", output_dir);
         gp = fopen(buf, "w");
         if (gp) {
-            fprintf(gp, "set terminal pngcairo size 1200,800\n"
+            fprintf(gp, "set terminal pngcairo size %d,%d\n"
                 "set datafile separator ','\n"
                 "set output '%s/delta.png'\n"
                 "set xlabel 'Time (s)'\nset ylabel 'Rotor Angle (rad) / Power (pu)'\n"
                 "set title 'Generator Dynamics'\n"
                 "plot '%s/delta.csv' using 1:2 with lines title 'd_g1'",
-                output_dir, output_dir);
+                plot_w, plot_h, output_dir, output_dir);
             for (int m = 1; m < sys.nmachines; m++)
                 fprintf(gp, ", '' using 1:%d with lines title 'd_g%d'",
                         3*m+2, sys.bus[sys.gen[sys.machine[m].gen_idx].bus].id);
@@ -486,13 +506,13 @@ int main(int argc, char **argv)
         snprintf(buf, sizeof(buf), "%s/voltage.gp", output_dir);
         gp = fopen(buf, "w");
         if (gp) {
-            fprintf(gp, "set terminal pngcairo size 1200,800\n"
+            fprintf(gp, "set terminal pngcairo size %d,%d\n"
                 "set datafile separator ','\n"
                 "set output '%s/voltage.png'\n"
                 "set xlabel 'Time (s)'\nset ylabel 'Voltage Magnitude (pu)'\n"
                 "set title 'Bus Voltages'\n"
                 "plot '%s/voltage.csv' using 1:2 with lines title 'Bus 1'",
-                output_dir, output_dir);
+                plot_w, plot_h, output_dir, output_dir);
             for (int i = 1; i < sys.nbus; i++)
                 fprintf(gp, ", '' using 1:%d with lines title 'Bus %d'",
                         2*i+2, sys.bus[i].id);
@@ -504,7 +524,7 @@ int main(int argc, char **argv)
             snprintf(buf, sizeof(buf), "%s/osc.gp", output_dir);
             gp = fopen(buf, "w");
             if (gp) {
-                fprintf(gp, "set terminal pngcairo size 1400,1000\n"
+                fprintf(gp, "set terminal pngcairo size %d,%d\n"
                     "set datafile separator ','\n"
                     "set output '%s/osc.png'\n"
                     "set xlabel 'Time (s)'\nset ylabel 'Instantaneous Voltage (pu)'\n"
@@ -514,8 +534,10 @@ int main(int argc, char **argv)
                     "plot '%s/osc_bus%d.csv' using 1:3 with lines title 'Vb'\n"
                     "plot '%s/osc_bus%d.csv' using 1:4 with lines title 'Vc'\n"
                     "unset multiplot\n",
-                    output_dir, osc_bus, output_dir, osc_bus,
-                    output_dir, osc_bus, output_dir, osc_bus);
+                    plot_w, plot_h * 3 / 2, output_dir, osc_bus,
+                    output_dir, osc_bus,
+                    output_dir, osc_bus,
+                    output_dir, osc_bus);
                 fclose(gp);
             }
         }
