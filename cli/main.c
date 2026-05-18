@@ -447,7 +447,7 @@ int main(int argc, char **argv)
         step++;
         while (t_next <= t + 1e-10) t_next += t_step;
 
-        /* progress bar + real-time sync */
+        /* progress bar + real-time sync + live data */
         {
             double pct = (t / t_end) * 100.0;
 
@@ -462,10 +462,32 @@ int main(int argc, char **argv)
             }
 
             int bar_w = 30, filled = (int)(pct * bar_w / 100.0);
-            fprintf(stderr, "\r[");
+            fprintf(stderr, "\r\033[K[");
             for (int b = 0; b < bar_w; b++) fputc(b < filled ? '=' : (b == filled ? '>' : ' '), stderr);
-            fprintf(stderr, "] %5.1f%% t=%.2fs %s   ",
+            fprintf(stderr, "] %5.1f%% t=%.2fs %s",
                     pct, t, realtime ? "[RT]" : "");
+
+            /* live data in real-time mode */
+            if (realtime && step > 0) {
+                double *y = N_VGetArrayPointer(itg.nvec_y);
+                fprintf(stderr, "  |");
+                /* show V at first 4 buses + fault bus */
+                for (int i = 0; i < sys.nbus && i < 5; i++) {
+                    double Vr = y[ndiff + 2*i], Vi = y[ndiff + 2*i + 1];
+                    fprintf(stderr, " V%d=%.3f", sys.bus[i].id, sqrt(Vr*Vr + Vi*Vi));
+                }
+                if (sys.fault_bus >= 0 && sys.fault_bus >= 5)
+                    fprintf(stderr, " FB%d=%.3f", sys.bus[sys.fault_bus].id,
+                            sqrt(y[ndiff+2*sys.fault_bus]*y[ndiff+2*sys.fault_bus]
+                               + y[ndiff+2*sys.fault_bus+1]*y[ndiff+2*sys.fault_bus+1]));
+                fprintf(stderr, "  |");
+                /* show gen deltas */
+                for (int m = 0; m < sys.nmachines && m < 4; m++) {
+                    int bid = sys.bus[sys.gen[sys.machine[m].gen_idx].bus].id;
+                    fprintf(stderr, " G%d:%.1f°", bid, y[2*m] * 180.0/M_PI);
+                }
+            }
+            fprintf(stderr, "   ");
             fflush(stderr);
         }
     }
