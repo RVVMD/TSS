@@ -31,17 +31,7 @@ typedef struct {
     double    time;
     int       bus;
     double    fault_r, fault_x;
-    /* tree iter for event list */
-    int       list_idx;
 } GUIEvent;
-
-/* signal tree node data */
-typedef struct {
-    int        sig_idx;    /* index into app->signals, -1 for parent */
-    int        parent_idx; /* index of parent node, -1 for root */
-    int        n_children;
-    gboolean   checked;
-} SigNode;
 
 typedef struct {
     System sys;
@@ -91,16 +81,16 @@ typedef struct {
     GtkTreeStore *sig_store;
     GtkWidget    *sig_tree;
 
-    /* file editor */
-    GtkWidget *editor_notebook;
-    GtkWidget *txt_raw, *txt_dyr, *txt_ini;
-    GtkTextBuffer *buf_raw, *buf_dyr, *buf_ini;
+    /* property editor form */
+    GtkWidget *prop_notebook;
+    GtkWidget *prop_box;
+    GtkWidget *prop_label;
+    GtkWidget **prop_entries;
+    int         prop_n_entries;
+
     char raw_path[512];
     char dyr_path[512];
     char ini_path[512];
-
-    /* track which files have been loaded for editor tabs */
-    int raw_loaded, dyr_loaded, ini_loaded;
 } App;
 
 /* forward declarations */
@@ -111,7 +101,6 @@ static GtkWidget *build_menu(App *app);
 static void  build_network_panel(App *app, GtkWidget **box);
 static void  build_sim_panel(App *app, GtkWidget **box);
 static void  build_event_panel(App *app, GtkWidget **box);
-static void  build_editor_panel(App *app, GtkWidget **box);
 static void  populate_network(App *app);
 static void  populate_events(App *app);
 static void  build_signal_tree(App *app);
@@ -128,13 +117,126 @@ static void  view_zoom_out(App *app);
 static void  view_fit(App *app);
 static void  view_select_all(App *app);
 static void  view_select_none(App *app);
-static void  editor_load_file(App *app, int tab);
-static void  editor_save_file(App *app);
 static void  on_btn_run(GtkWidget *btn, App *app);
-static void  on_editor_load(GtkWidget *btn, App *app);
-static void  on_editor_save(GtkWidget *btn, App *app);
-static void  on_editor_btn_load(GtkWidget *btn, App *app);
 static gpointer sim_thread_fn(gpointer data);
+
+/* ── cell editing callbacks ── */
+static void bus_cell_edited(GtkCellRendererText *cell, gchar *path_string,
+                            gchar *new_text, gpointer user_data) {
+    App *app = (App *)user_data;
+    GtkTreePath *path = gtk_tree_path_new_from_string(path_string);
+    GtkTreeIter iter;
+    int col = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(cell), "col_idx"));
+    if (!gtk_tree_model_get_iter(GTK_TREE_MODEL(app->bus_store), &iter, path)) {
+        gtk_tree_path_free(path);
+        return;
+    }
+    int row = gtk_tree_path_get_indices(path)[0];
+    if (row < 0 || row >= app->sys.nbus) { gtk_tree_path_free(path); return; }
+    Bus *b = &app->sys.bus[row];
+
+    switch (col) {
+    case 1: strncpy(b->name, new_text, sizeof(b->name) - 1); break;
+    case 3: b->base_kv = atof(new_text); break;
+    case 4: b->vm = atof(new_text); break;
+    case 5: b->pd = atof(new_text) / app->sys.base_mva; break;
+    case 6: b->qd = atof(new_text) / app->sys.base_mva; break;
+    case 2: /* type dropdown */
+        if (strcmp(new_text, "SLACK") == 0) b->type = BUS_SLACK;
+        else if (strcmp(new_text, "PV") == 0) b->type = BUS_PV;
+        else b->type = BUS_PQ;
+        break;
+    }
+    populate_network(app);
+    gtk_tree_path_free(path);
+}
+
+static void branch_cell_edited(GtkCellRendererText *cell, gchar *path_string,
+                               gchar *new_text, gpointer user_data) {
+    App *app = (App *)user_data;
+    GtkTreePath *path = gtk_tree_path_new_from_string(path_string);
+    int col = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(cell), "col_idx"));
+    if (!path) return;
+    int row = gtk_tree_path_get_indices(path)[0];
+    if (row < 0 || row >= app->sys.nbranch) { gtk_tree_path_free(path); return; }
+    Branch *br = &app->sys.branch[row];
+
+    switch (col) {
+    case 2: br->r = atof(new_text); break;
+    case 3: br->x = atof(new_text); break;
+    case 4: br->b = atof(new_text); break;
+    case 5: br->tap = atof(new_text); break;
+    case 6: br->status = (strcmp(new_text, "ON") == 0) ? 1 : 0; break;
+    }
+    populate_network(app);
+    gtk_tree_path_free(path);
+}
+
+static void gen_cell_edited(GtkCellRendererText *cell, gchar *path_string,
+                            gchar *new_text, gpointer user_data) {
+    App *app = (App *)user_data;
+    GtkTreePath *path = gtk_tree_path_new_from_string(path_string);
+    int col = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(cell), "col_idx"));
+    if (!path) return;
+    int row = gtk_tree_path_get_indices(path)[0];
+    if (row < 0 || row >= app->sys.ngen) { gtk_tree_path_free(path); return; }
+    Gen *g = &app->sys.gen[row];
+
+    switch (col) {
+    case 1: g->pg = atof(new_text) / app->sys.base_mva; break;
+    case 2: g->qg = atof(new_text) / app->sys.base_mva; break;
+    case 3: g->vsched = atof(new_text); break;
+    case 4: g->mbase = atof(new_text); break;
+    }
+    populate_network(app);
+    gtk_tree_path_free(path);
+}
+
+static void load_cell_edited(GtkCellRendererText *cell, gchar *path_string,
+                             gchar *new_text, gpointer user_data) {
+    App *app = (App *)user_data;
+    GtkTreePath *path = gtk_tree_path_new_from_string(path_string);
+    int col = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(cell), "col_idx"));
+    if (!path) return;
+    int row = gtk_tree_path_get_indices(path)[0];
+    if (row < 0 || row >= app->sys.nload) { gtk_tree_path_free(path); return; }
+    Load *l = &app->sys.load[row];
+
+    switch (col) {
+    case 1: l->p = atof(new_text) / app->sys.base_mva; break;
+    case 2: l->q = atof(new_text) / app->sys.base_mva; break;
+    case 3: l->status = (strcmp(new_text, "ON") == 0) ? 1 : 0; break;
+    }
+    populate_network(app);
+    gtk_tree_path_free(path);
+}
+
+static void event_cell_edited(GtkCellRendererText *cell, gchar *path_string,
+                              gchar *new_text, gpointer user_data) {
+    App *app = (App *)user_data;
+    GtkTreePath *path = gtk_tree_path_new_from_string(path_string);
+    int col = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(cell), "col_idx"));
+    if (!path) return;
+    int row = gtk_tree_path_get_indices(path)[0];
+    if (row < 0 || row >= app->n_events) { gtk_tree_path_free(path); return; }
+    GUIEvent *e = &app->events[row];
+
+    switch (col) {
+    case 1: e->time = atof(new_text); break;
+    case 2: /* type */
+        if (strcmp(new_text, "3ph") == 0) e->type = FAULT;
+        else if (strcmp(new_text, "SLG") == 0) e->type = FAULT_SLG;
+        else if (strcmp(new_text, "LL") == 0) e->type = FAULT_LL;
+        else if (strcmp(new_text, "DLG") == 0) e->type = FAULT_DLG;
+        else if (strcmp(new_text, "clear") == 0) e->type = FAULT_CLEAR;
+        break;
+    case 3: e->bus = atoi(new_text); break;
+    case 4: e->fault_r = atof(new_text); break;
+    case 5: e->fault_x = atof(new_text); break;
+    }
+    populate_events(app);
+    gtk_tree_path_free(path);
+}
 
 static const char *btype(BusType t) {
     switch(t) { case BUS_SLACK: return "SLACK"; case BUS_PV: return "PV"; case BUS_PQ: return "PQ"; default: return "ISO"; }
@@ -470,7 +572,7 @@ static GtkWidget *build_menu(App *app) {
 /* ── file dialogs ── */
 static void file_load_raw(App *app) {
     GtkWidget *dlg = gtk_file_chooser_dialog_new("Load PSS/E RAW File",
-        GTK_WINDOW(app->window), GTK_FILE_CHOOSER_ACTION_OPEN,
+        NULL, GTK_FILE_CHOOSER_ACTION_OPEN,
         "_Cancel", GTK_RESPONSE_CANCEL, "_Open", GTK_RESPONSE_ACCEPT, NULL);
     if (gtk_dialog_run(GTK_DIALOG(dlg)) == GTK_RESPONSE_ACCEPT) {
         char *fn = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dlg));
@@ -478,12 +580,10 @@ static void file_load_raw(App *app) {
         gtk_label_set_text(GTK_LABEL(app->lbl_raw), fn);
         if (raw_parse(fn, &app->sys, &app->arena) == 0) {
             app->sys.fault_bus = -1;
-            app->raw_loaded = 1;
             populate_network(app);
             build_signal_tree(app);
-            editor_load_file(app, 0);
         } else {
-            GtkWidget *err = gtk_message_dialog_new(GTK_WINDOW(app->window),
+            GtkWidget *err = gtk_message_dialog_new(NULL,
                 GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "Failed to parse RAW file");
             gtk_dialog_run(GTK_DIALOG(err)); gtk_widget_destroy(err);
         }
@@ -494,7 +594,7 @@ static void file_load_raw(App *app) {
 
 static void file_load_dyr(App *app) {
     GtkWidget *dlg = gtk_file_chooser_dialog_new("Load PSS/E DYR File",
-        GTK_WINDOW(app->window), GTK_FILE_CHOOSER_ACTION_OPEN,
+        NULL, GTK_FILE_CHOOSER_ACTION_OPEN,
         "_Cancel", GTK_RESPONSE_CANCEL, "_Open", GTK_RESPONSE_ACCEPT, NULL);
     if (gtk_dialog_run(GTK_DIALOG(dlg)) == GTK_RESPONSE_ACCEPT) {
         char *fn = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dlg));
@@ -502,12 +602,10 @@ static void file_load_dyr(App *app) {
         gtk_label_set_text(GTK_LABEL(app->lbl_dyr), fn);
         if (dyr_parse(fn, &app->sys, &app->arena) == 0) {
             app->sys_loaded = 1;
-            app->dyr_loaded = 1;
             populate_network(app);
             build_signal_tree(app);
-            editor_load_file(app, 1);
         } else {
-            GtkWidget *err = gtk_message_dialog_new(GTK_WINDOW(app->window),
+            GtkWidget *err = gtk_message_dialog_new(NULL,
                 GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "Failed to parse DYR file");
             gtk_dialog_run(GTK_DIALOG(err)); gtk_widget_destroy(err);
         }
@@ -518,7 +616,7 @@ static void file_load_dyr(App *app) {
 
 static void file_load_events(App *app) {
     GtkWidget *dlg = gtk_file_chooser_dialog_new("Load Event INI File",
-        GTK_WINDOW(app->window), GTK_FILE_CHOOSER_ACTION_OPEN,
+        NULL, GTK_FILE_CHOOSER_ACTION_OPEN,
         "_Cancel", GTK_RESPONSE_CANCEL, "_Open", GTK_RESPONSE_ACCEPT, NULL);
     if (gtk_dialog_run(GTK_DIALOG(dlg)) == GTK_RESPONSE_ACCEPT) {
         char *fn = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dlg));
@@ -535,12 +633,9 @@ static void file_load_events(App *app) {
                 app->events[i].bus = tmp_ev[i].bus;
                 app->events[i].fault_r = tmp_ev[i].fault_r;
                 app->events[i].fault_x = tmp_ev[i].fault_x;
-                app->events[i].list_idx = i;
                 app->n_events++;
             }
             populate_events(app);
-            app->ini_loaded = 1;
-            editor_load_file(app, 2);
         }
         arena_free(&tmp);
         g_free(fn);
@@ -548,51 +643,93 @@ static void file_load_events(App *app) {
     gtk_widget_destroy(dlg);
 }
 
-/* ── network panel ── */
+/* ── network panel with inline editing ── */
 static void build_network_panel(App *app, GtkWidget **box) {
     GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
     GtkWidget *nb = gtk_notebook_new();
 
+    /* Buses */
     app->bus_store = gtk_list_store_new(7, G_TYPE_INT, G_TYPE_STRING, G_TYPE_STRING,
         G_TYPE_DOUBLE, G_TYPE_DOUBLE, G_TYPE_DOUBLE, G_TYPE_DOUBLE);
     app->bus_tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(app->bus_store));
     const char *bus_cols[] = {"ID", "Name", "Type", "kV", "Vm(pu)", "Pd(MW)", "Qd(MVar)"};
     for (int i = 0; i < 7; i++) {
         GtkCellRenderer *r = gtk_cell_renderer_text_new();
+        if (i == 0) { g_object_set(r, "editable", FALSE, NULL); }
+        else {
+            g_object_set(r, "editable", TRUE, NULL);
+            g_object_set_data(G_OBJECT(r), "col_idx", GINT_TO_POINTER(i));
+            g_signal_connect(r, "edited", G_CALLBACK(bus_cell_edited), app);
+        }
+        if (i == 2) {
+            GtkCellRenderer *rc = gtk_cell_renderer_combo_new();
+            GtkListStore *ls = gtk_list_store_new(1, G_TYPE_STRING);
+            GtkTreeIter it;
+            gtk_list_store_append(ls, &it); gtk_list_store_set(ls, &it, 0, "PQ", -1);
+            gtk_list_store_append(ls, &it); gtk_list_store_set(ls, &it, 0, "PV", -1);
+            gtk_list_store_append(ls, &it); gtk_list_store_set(ls, &it, 0, "SLACK", -1);
+            g_object_set(rc, "model", ls, "text-column", 0, "has-entry", FALSE, "editable", TRUE, NULL);
+            g_object_unref(ls);
+            g_object_set_data(G_OBJECT(rc), "col_idx", GINT_TO_POINTER(i));
+            g_signal_connect(rc, "edited", G_CALLBACK(bus_cell_edited), app);
+            gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(app->bus_tree), i, bus_cols[i], rc, "text", i, NULL);
+            continue;
+        }
         gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(app->bus_tree), i, bus_cols[i], r, "text", i, NULL);
     }
     GtkWidget *sw = gtk_scrolled_window_new(NULL, NULL);
     gtk_container_add(GTK_CONTAINER(sw), app->bus_tree);
     gtk_notebook_append_page(GTK_NOTEBOOK(nb), sw, gtk_label_new("Buses"));
 
+    /* Branches */
     app->branch_store = gtk_list_store_new(7, G_TYPE_INT, G_TYPE_INT, G_TYPE_DOUBLE,
         G_TYPE_DOUBLE, G_TYPE_DOUBLE, G_TYPE_DOUBLE, G_TYPE_STRING);
     app->branch_tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(app->branch_store));
     const char *br_cols[] = {"From", "To", "R", "X", "B", "Tap", "Status"};
     for (int i = 0; i < 7; i++) {
         GtkCellRenderer *r = gtk_cell_renderer_text_new();
+        if (i < 2) { g_object_set(r, "editable", FALSE, NULL); }
+        else {
+            g_object_set(r, "editable", TRUE, NULL);
+            g_object_set_data(G_OBJECT(r), "col_idx", GINT_TO_POINTER(i));
+            g_signal_connect(r, "edited", G_CALLBACK(branch_cell_edited), app);
+        }
         gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(app->branch_tree), i, br_cols[i], r, "text", i, NULL);
     }
     sw = gtk_scrolled_window_new(NULL, NULL);
     gtk_container_add(GTK_CONTAINER(sw), app->branch_tree);
     gtk_notebook_append_page(GTK_NOTEBOOK(nb), sw, gtk_label_new("Branches"));
 
+    /* Generators */
     app->gen_store = gtk_list_store_new(5, G_TYPE_INT, G_TYPE_DOUBLE, G_TYPE_DOUBLE, G_TYPE_DOUBLE, G_TYPE_DOUBLE);
     app->gen_tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(app->gen_store));
     const char *gen_cols[] = {"Bus", "Pg(MW)", "Qg(MVar)", "Vsched", "Mbase"};
     for (int i = 0; i < 5; i++) {
         GtkCellRenderer *r = gtk_cell_renderer_text_new();
+        if (i == 0) { g_object_set(r, "editable", FALSE, NULL); }
+        else {
+            g_object_set(r, "editable", TRUE, NULL);
+            g_object_set_data(G_OBJECT(r), "col_idx", GINT_TO_POINTER(i));
+            g_signal_connect(r, "edited", G_CALLBACK(gen_cell_edited), app);
+        }
         gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(app->gen_tree), i, gen_cols[i], r, "text", i, NULL);
     }
     sw = gtk_scrolled_window_new(NULL, NULL);
     gtk_container_add(GTK_CONTAINER(sw), app->gen_tree);
     gtk_notebook_append_page(GTK_NOTEBOOK(nb), sw, gtk_label_new("Generators"));
 
+    /* Loads */
     app->load_store = gtk_list_store_new(4, G_TYPE_INT, G_TYPE_DOUBLE, G_TYPE_DOUBLE, G_TYPE_STRING);
     app->load_tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(app->load_store));
     const char *ld_cols[] = {"Bus", "P(MW)", "Q(MVar)", "Status"};
     for (int i = 0; i < 4; i++) {
         GtkCellRenderer *r = gtk_cell_renderer_text_new();
+        if (i == 0) { g_object_set(r, "editable", FALSE, NULL); }
+        else {
+            g_object_set(r, "editable", TRUE, NULL);
+            g_object_set_data(G_OBJECT(r), "col_idx", GINT_TO_POINTER(i));
+            g_signal_connect(r, "edited", G_CALLBACK(load_cell_edited), app);
+        }
         gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(app->load_tree), i, ld_cols[i], r, "text", i, NULL);
     }
     sw = gtk_scrolled_window_new(NULL, NULL);
@@ -601,17 +738,11 @@ static void build_network_panel(App *app, GtkWidget **box) {
 
     gtk_box_pack_start(GTK_BOX(vbox), nb, TRUE, TRUE, 0);
 
-    /* edit RAW/DYR buttons */
-    GtkWidget *hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-    GtkWidget *btn_edit_raw = gtk_button_new_with_label("Edit RAW");
-    GtkWidget *btn_edit_dyr = gtk_button_new_with_label("Edit DYR");
-    g_signal_connect(btn_edit_raw, "clicked", G_CALLBACK(on_editor_btn_load), app);
-    g_signal_connect(btn_edit_dyr, "clicked", G_CALLBACK(on_editor_btn_load), app);
-    g_object_set_data(G_OBJECT(btn_edit_raw), "tab_idx", GINT_TO_POINTER(0));
-    g_object_set_data(G_OBJECT(btn_edit_dyr), "tab_idx", GINT_TO_POINTER(1));
-    gtk_box_pack_start(GTK_BOX(hbox), btn_edit_raw, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(hbox), btn_edit_dyr, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(vbox), hbox, FALSE, FALSE, 0);
+    /* hint */
+    GtkWidget *hint = gtk_label_new("Double-click a cell to edit. Changes apply immediately.");
+    gtk_label_set_xalign(GTK_LABEL(hint), 0);
+    gtk_widget_set_state_flags(hint, GTK_STATE_FLAG_INSENSITIVE, FALSE);
+    gtk_box_pack_start(GTK_BOX(vbox), hint, FALSE, FALSE, 0);
 
     *box = vbox;
 }
@@ -658,7 +789,6 @@ static void populate_network(App *app) {
 /* ── signal tree with parent-child sync ── */
 enum { SIG_COL_CHECK = 0, SIG_COL_LABEL, SIG_COL_IDX, SIG_N_COLS };
 
-/* Recursively set check state on a tree node and all its children */
 static void sig_set_children(GtkTreeStore *store, GtkTreeIter *parent, gboolean state, App *app) {
     GtkTreeIter child;
     if (gtk_tree_model_iter_children(GTK_TREE_MODEL(store), &child, parent)) {
@@ -673,7 +803,6 @@ static void sig_set_children(GtkTreeStore *store, GtkTreeIter *parent, gboolean 
     }
 }
 
-/* Update parent check state based on children */
 static void sig_update_parent(GtkTreeStore *store, GtkTreeIter *parent, App *app) {
     GtkTreeIter child;
     int total = 0, checked = 0;
@@ -709,10 +838,8 @@ static void sig_toggled(GtkCellRendererToggle *cell, gchar *path_str, gpointer u
     if (idx >= 0 && idx < app->n_signals) {
         app->signals[idx].visible = active;
     }
-    /* toggle all children */
     sig_set_children(app->sig_store, &iter, active, app);
 
-    /* update parent */
     GtkTreePath *parent_path = gtk_tree_path_copy(path);
     if (gtk_tree_path_up(parent_path)) {
         GtkTreeIter p_iter;
@@ -798,6 +925,12 @@ static void build_event_panel(App *app, GtkWidget **box) {
     const char *ev_cols[] = {"#", "Time(s)", "Type", "Bus", "R", "X"};
     for (int i = 0; i < 6; i++) {
         GtkCellRenderer *r = gtk_cell_renderer_text_new();
+        if (i == 0) { g_object_set(r, "editable", FALSE, NULL); }
+        else {
+            g_object_set(r, "editable", TRUE, NULL);
+            g_object_set_data(G_OBJECT(r), "col_idx", GINT_TO_POINTER(i));
+            g_signal_connect(r, "edited", G_CALLBACK(event_cell_edited), app);
+        }
         gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(app->event_tree), i, ev_cols[i], r, "text", i, NULL);
     }
     GtkWidget *sw = gtk_scrolled_window_new(NULL, NULL);
@@ -809,17 +942,18 @@ static void build_event_panel(App *app, GtkWidget **box) {
     GtkWidget *btn_add = gtk_button_new_with_label("Add Fault...");
     GtkWidget *btn_del = gtk_button_new_with_label("Delete");
     GtkWidget *btn_save = gtk_button_new_with_label("Save INI");
-    GtkWidget *btn_edit = gtk_button_new_with_label("Edit INI");
     g_signal_connect(btn_add, "clicked", G_CALLBACK(sim_add_event), app);
     g_signal_connect(btn_del, "clicked", G_CALLBACK(sim_delete_event), app);
     g_signal_connect(btn_save, "clicked", G_CALLBACK(sim_save_events), app);
-    g_signal_connect(btn_edit, "clicked", G_CALLBACK(on_editor_btn_load), app);
-    g_object_set_data(G_OBJECT(btn_edit), "tab_idx", GINT_TO_POINTER(2));
     gtk_box_pack_start(GTK_BOX(hbox), btn_add, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(hbox), btn_del, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(hbox), btn_save, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(hbox), btn_edit, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(vbox), hbox, FALSE, FALSE, 0);
+
+    GtkWidget *hint = gtk_label_new("Double-click a cell to edit. Changes apply immediately.");
+    gtk_label_set_xalign(GTK_LABEL(hint), 0);
+    gtk_widget_set_state_flags(hint, GTK_STATE_FLAG_INSENSITIVE, FALSE);
+    gtk_box_pack_start(GTK_BOX(vbox), hint, FALSE, FALSE, 0);
 
     *box = vbox;
 }
@@ -837,9 +971,8 @@ static void populate_events(App *app) {
 }
 
 static void sim_add_event(App *app) {
-    /* dialog to choose fault type */
     GtkWidget *dlg = gtk_dialog_new_with_buttons("Add Fault",
-        GTK_WINDOW(app->window), GTK_DIALOG_MODAL,
+        NULL, GTK_DIALOG_MODAL,
         "_Cancel", GTK_RESPONSE_CANCEL, "_Add", GTK_RESPONSE_ACCEPT, NULL);
     GtkWidget *area = gtk_dialog_get_content_area(GTK_DIALOG(dlg));
     gtk_container_set_border_width(GTK_CONTAINER(area), 10);
@@ -883,7 +1016,7 @@ static void sim_add_event(App *app) {
 
     if (gtk_dialog_run(GTK_DIALOG(dlg)) == GTK_RESPONSE_ACCEPT) {
         if (app->n_events >= MAX_EVENTS) {
-            GtkWidget *err = gtk_message_dialog_new(GTK_WINDOW(app->window),
+            GtkWidget *err = gtk_message_dialog_new(NULL,
                 GTK_DIALOG_MODAL, GTK_MESSAGE_WARNING, GTK_BUTTONS_OK, "Max events reached");
             gtk_dialog_run(GTK_DIALOG(err)); gtk_widget_destroy(err);
         } else {
@@ -895,7 +1028,6 @@ static void sim_add_event(App *app) {
             e->bus = (int)gtk_spin_button_get_value(GTK_SPIN_BUTTON(spin_b));
             e->fault_r = gtk_spin_button_get_value(GTK_SPIN_BUTTON(spin_r));
             e->fault_x = gtk_spin_button_get_value(GTK_SPIN_BUTTON(spin_x));
-            e->list_idx = app->n_events;
             app->n_events++;
             populate_events(app);
         }
@@ -923,7 +1055,7 @@ static void sim_delete_event(App *app) {
 
 static void sim_save_events(App *app) {
     GtkWidget *dlg = gtk_file_chooser_dialog_new("Save Events INI",
-        GTK_WINDOW(app->window), GTK_FILE_CHOOSER_ACTION_SAVE,
+        NULL, GTK_FILE_CHOOSER_ACTION_SAVE,
         "_Cancel", GTK_RESPONSE_CANCEL, "_Save", GTK_RESPONSE_ACCEPT, NULL);
     if (gtk_dialog_run(GTK_DIALOG(dlg)) == GTK_RESPONSE_ACCEPT) {
         char *fn = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dlg));
@@ -940,129 +1072,6 @@ static void sim_save_events(App *app) {
     gtk_widget_destroy(dlg);
 }
 
-/* ── file editor panel ── */
-static void build_editor_panel(App *app, GtkWidget **box) {
-    GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
-
-    app->editor_notebook = gtk_notebook_new();
-
-    app->buf_raw = gtk_text_buffer_new(NULL);
-    app->txt_raw = gtk_text_view_new_with_buffer(app->buf_raw);
-    gtk_text_view_set_monospace(GTK_TEXT_VIEW(app->txt_raw), TRUE);
-    gtk_text_view_set_editable(GTK_TEXT_VIEW(app->txt_raw), TRUE);
-    GtkWidget *sw1 = gtk_scrolled_window_new(NULL, NULL);
-    gtk_container_add(GTK_CONTAINER(sw1), app->txt_raw);
-    gtk_notebook_append_page(GTK_NOTEBOOK(app->editor_notebook), sw1, gtk_label_new("RAW"));
-
-    app->buf_dyr = gtk_text_buffer_new(NULL);
-    app->txt_dyr = gtk_text_view_new_with_buffer(app->buf_dyr);
-    gtk_text_view_set_monospace(GTK_TEXT_VIEW(app->txt_dyr), TRUE);
-    gtk_text_view_set_editable(GTK_TEXT_VIEW(app->txt_dyr), TRUE);
-    GtkWidget *sw2 = gtk_scrolled_window_new(NULL, NULL);
-    gtk_container_add(GTK_CONTAINER(sw2), app->txt_dyr);
-    gtk_notebook_append_page(GTK_NOTEBOOK(app->editor_notebook), sw2, gtk_label_new("DYR"));
-
-    app->buf_ini = gtk_text_buffer_new(NULL);
-    app->txt_ini = gtk_text_view_new_with_buffer(app->buf_ini);
-    gtk_text_view_set_monospace(GTK_TEXT_VIEW(app->txt_ini), TRUE);
-    gtk_text_view_set_editable(GTK_TEXT_VIEW(app->txt_ini), TRUE);
-    GtkWidget *sw3 = gtk_scrolled_window_new(NULL, NULL);
-    gtk_container_add(GTK_CONTAINER(sw3), app->txt_ini);
-    gtk_notebook_append_page(GTK_NOTEBOOK(app->editor_notebook), sw3, gtk_label_new("Events INI"));
-
-    gtk_box_pack_start(GTK_BOX(vbox), app->editor_notebook, TRUE, TRUE, 0);
-
-    GtkWidget *hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-    GtkWidget *btn_load = gtk_button_new_with_label("Reload");
-    GtkWidget *btn_save = gtk_button_new_with_label("Save");
-    GtkWidget *btn_parse = gtk_button_new_with_label("Re-parse");
-    g_signal_connect(btn_load, "clicked", G_CALLBACK(on_editor_load), app);
-    g_signal_connect(btn_save, "clicked", G_CALLBACK(on_editor_save), app);
-    g_signal_connect(btn_parse, "clicked", G_CALLBACK(on_btn_run), app);
-    gtk_box_pack_start(GTK_BOX(hbox), btn_load, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(hbox), btn_save, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(hbox), btn_parse, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(vbox), hbox, FALSE, FALSE, 0);
-
-    *box = vbox;
-}
-
-static void editor_load_file(App *app, int tab) {
-    const char *paths[] = { app->raw_path, app->dyr_path, app->ini_path };
-    GtkTextBuffer *bufs[] = { app->buf_raw, app->buf_dyr, app->buf_ini };
-
-    /* if called from a button with tab_idx data, use that */
-    int use_tab = tab;
-    /* caller can set tab via g_object_set_data */
-    if (tab == -1) {
-        /* load all loaded tabs */
-        for (int t = 0; t < 3; t++) {
-            if (paths[t][0] == '\0') continue;
-            FILE *f = fopen(paths[t], "r");
-            if (!f) continue;
-            fseek(f, 0, SEEK_END);
-            long sz = ftell(f);
-            fseek(f, 0, SEEK_SET);
-            char *buf = malloc(sz + 1);
-            fread(buf, 1, sz, f);
-            buf[sz] = '\0';
-            fclose(f);
-            GtkTextIter start, end;
-            gtk_text_buffer_get_start_iter(bufs[t], &start);
-            gtk_text_buffer_get_end_iter(bufs[t], &end);
-            gtk_text_buffer_delete(bufs[t], &start, &end);
-            gtk_text_buffer_get_end_iter(bufs[t], &end);
-            gtk_text_buffer_insert(bufs[t], &end, buf, -1);
-            free(buf);
-        }
-    } else {
-        if (paths[tab][0] == '\0') return;
-        FILE *f = fopen(paths[tab], "r");
-        if (!f) return;
-        fseek(f, 0, SEEK_END);
-        long sz = ftell(f);
-        fseek(f, 0, SEEK_SET);
-        char *buf = malloc(sz + 1);
-        fread(buf, 1, sz, f);
-        buf[sz] = '\0';
-        fclose(f);
-        GtkTextIter start, end;
-        gtk_text_buffer_get_start_iter(bufs[tab], &start);
-        gtk_text_buffer_get_end_iter(bufs[tab], &end);
-        gtk_text_buffer_delete(bufs[tab], &start, &end);
-        gtk_text_buffer_get_end_iter(bufs[tab], &end);
-        gtk_text_buffer_insert(bufs[tab], &end, buf, -1);
-        free(buf);
-        /* switch to that tab */
-        gtk_notebook_set_current_page(GTK_NOTEBOOK(app->editor_notebook), tab);
-    }
-}
-
-static void editor_save_file(App *app) {
-    int page = gtk_notebook_get_current_page(GTK_NOTEBOOK(app->editor_notebook));
-    const char *paths[] = { app->raw_path, app->dyr_path, app->ini_path };
-    GtkTextBuffer *bufs[] = { app->buf_raw, app->buf_dyr, app->buf_ini };
-
-    if (paths[page][0] == '\0') {
-        GtkWidget *dlg = gtk_message_dialog_new(GTK_WINDOW(app->window),
-            GTK_DIALOG_MODAL, GTK_MESSAGE_WARNING, GTK_BUTTONS_OK, "No file loaded for this tab");
-        gtk_dialog_run(GTK_DIALOG(dlg)); gtk_widget_destroy(dlg);
-        return;
-    }
-
-    GtkTextIter start, end;
-    gtk_text_buffer_get_start_iter(bufs[page], &start);
-    gtk_text_buffer_get_end_iter(bufs[page], &end);
-    char *text = gtk_text_buffer_get_text(bufs[page], &start, &end, FALSE);
-
-    FILE *f = fopen(paths[page], "w");
-    if (f) {
-        fputs(text, f);
-        fclose(f);
-    }
-    g_free(text);
-}
-
 /* ── simulation panel ── */
 static void on_btn_run(GtkWidget *btn, App *app) { sim_run(app); }
 static void on_btn_stop(GtkWidget *btn, App *app) { sim_stop(app); }
@@ -1071,20 +1080,6 @@ static void on_btn_zoom_out(GtkWidget *btn, App *app) { view_zoom_out(app); }
 static void on_btn_fit(GtkWidget *btn, App *app) { view_fit(app); }
 static void on_btn_sel_all(GtkWidget *btn, App *app) { view_select_all(app); }
 static void on_btn_sel_none(GtkWidget *btn, App *app) { view_select_none(app); }
-
-/* wrapper for editor buttons that pass tab_idx via g_object_set_data */
-static void on_editor_btn_load(GtkWidget *btn, App *app) {
-    int tab = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(btn), "tab_idx"));
-    editor_load_file(app, tab);
-}
-
-static void on_editor_load(GtkWidget *btn, App *app) {
-    editor_load_file(app, -1);
-}
-
-static void on_editor_save(GtkWidget *btn, App *app) {
-    editor_save_file(app);
-}
 
 static void build_sim_panel(App *app, GtkWidget **box) {
     GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
@@ -1387,7 +1382,7 @@ static gpointer sim_thread_fn(gpointer data) {
 static void sim_run(App *app) {
     if (app->sim_running) return;
     if (!app->sys_loaded) {
-        GtkWidget *dlg = gtk_message_dialog_new(GTK_WINDOW(app->window),
+        GtkWidget *dlg = gtk_message_dialog_new(NULL,
             GTK_DIALOG_MODAL, GTK_MESSAGE_WARNING, GTK_BUTTONS_OK, "Load RAW and DYR files first!");
         gtk_dialog_run(GTK_DIALOG(dlg)); gtk_widget_destroy(dlg);
         return;
@@ -1450,10 +1445,9 @@ static void build_ui(App *app) {
     GtkWidget *menubar = build_menu(app);
     gtk_box_pack_start(GTK_BOX(vbox), menubar, FALSE, FALSE, 0);
 
-    /* main horizontal paned: left | right */
     GtkWidget *hpaned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
 
-    /* left: vertical paned: network on top, events on bottom */
+    /* left: network on top, events on bottom */
     GtkWidget *left_vpaned = gtk_paned_new(GTK_ORIENTATION_VERTICAL);
     GtkWidget *net_box;
     build_network_panel(app, &net_box);
@@ -1469,7 +1463,7 @@ static void build_ui(App *app) {
 
     gtk_paned_pack1(GTK_PANED(hpaned), left_vpaned, TRUE, FALSE);
 
-    /* right: vertical paned: sim+plot on top, editor+signals on bottom */
+    /* right: sim+plot on top, signals on bottom */
     GtkWidget *right_vpaned = gtk_paned_new(GTK_ORIENTATION_VERTICAL);
 
     GtkWidget *sim_box;
@@ -1478,15 +1472,7 @@ static void build_ui(App *app) {
     gtk_container_add(GTK_CONTAINER(sim_frame), sim_box);
     gtk_paned_pack1(GTK_PANED(right_vpaned), sim_frame, TRUE, FALSE);
 
-    /* bottom: editor + signal tree side by side */
-    GtkWidget *bottom_hpaned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
-
-    GtkWidget *ed_box;
-    build_editor_panel(app, &ed_box);
-    GtkWidget *ed_frame = gtk_frame_new("File Editor");
-    gtk_container_add(GTK_CONTAINER(ed_frame), ed_box);
-    gtk_paned_pack1(GTK_PANED(bottom_hpaned), ed_frame, TRUE, FALSE);
-
+    /* signal tree */
     GtkWidget *sig_frame = gtk_frame_new("Signals");
     GtkWidget *sig_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     app->sig_store = gtk_tree_store_new(SIG_N_COLS, G_TYPE_BOOLEAN, G_TYPE_STRING, G_TYPE_INT);
@@ -1497,13 +1483,12 @@ static void build_ui(App *app) {
     GtkCellRenderer *r_text = gtk_cell_renderer_text_new();
     gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(app->sig_tree), 1, "Signal", r_text, "text", SIG_COL_LABEL, NULL);
     GtkWidget *sig_sw = gtk_scrolled_window_new(NULL, NULL);
-    gtk_widget_set_size_request(sig_sw, -1, 180);
+    gtk_widget_set_size_request(sig_sw, -1, 200);
     gtk_container_add(GTK_CONTAINER(sig_sw), app->sig_tree);
     gtk_box_pack_start(GTK_BOX(sig_vbox), sig_sw, TRUE, TRUE, 0);
     gtk_container_add(GTK_CONTAINER(sig_frame), sig_vbox);
-    gtk_paned_pack2(GTK_PANED(bottom_hpaned), sig_frame, FALSE, FALSE);
+    gtk_paned_pack2(GTK_PANED(right_vpaned), sig_frame, FALSE, FALSE);
 
-    gtk_paned_pack2(GTK_PANED(right_vpaned), bottom_hpaned, FALSE, FALSE);
     gtk_paned_pack2(GTK_PANED(hpaned), right_vpaned, TRUE, FALSE);
 
     gtk_box_pack_start(GTK_BOX(vbox), hpaned, TRUE, TRUE, 0);
