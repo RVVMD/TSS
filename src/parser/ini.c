@@ -48,6 +48,9 @@ int events_parse(const char *filename, Event **evlist, Arena *a)
         if (!strcmp(key, "time"))     curev.time     = atof(val);
         else if (!strcmp(key, "type")) {
             if (!strcmp(val, "fault"))      curev.type = FAULT;
+            else if (!strcmp(val, "slg"))    curev.type = FAULT_SLG;
+            else if (!strcmp(val, "ll"))     curev.type = FAULT_LL;
+            else if (!strcmp(val, "dlg"))    curev.type = FAULT_DLG;
             else if (!strcmp(val, "line-open"))  curev.type = LINE_OPEN;
             else if (!strcmp(val, "clear"))      curev.type = FAULT_CLEAR;
             else if (!strcmp(val, "end"))       curev.type = END_SIM;

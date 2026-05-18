@@ -23,9 +23,10 @@ int dae_init(DAE *dae, System *sys, Arena *a)
     dae->jval = NULL;
     dae->jnnz = 0;
 
-    sys->fault_bus = -1;
-    sys->fault_Y_r = 0;
-    sys->fault_Y_i = 0;
+    sys->fault_bus  = -1;
+    sys->fault_Y_r  = 0;
+    sys->fault_Y_i  = 0;
+    sys->fault_type = 0;
 
     return 0;
 }

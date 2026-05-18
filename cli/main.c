@@ -150,6 +150,7 @@ int main(int argc, char **argv)
 
     double t = 0.0, t_next = t_step, t_prev = 0.0;
     double Vr_prev = 0, Vi_prev = 0;
+    double Va_pr = 0, Va_pi = 0, Vb_pr = 0, Vb_pi = 0, Vc_pr = 0, Vc_pi = 0;
     int step = 0, ev_idx = 0;
     int ndiff = dae.ndiff, neq = dae.neq;
 
@@ -158,6 +159,10 @@ int main(int argc, char **argv)
         double *y0 = N_VGetArrayPointer(itg.nvec_y);
         Vr_prev = y0[ndiff + 2*osc_idx];
         Vi_prev = y0[ndiff + 2*osc_idx + 1];
+        double a2r=-0.5, a2i=-0.86602540378, ar=-0.5, ai=0.86602540378;
+        Va_pr = Vr_prev; Va_pi = Vi_prev;
+        Vb_pr = a2r*Vr_prev - a2i*Vi_prev; Vb_pi = a2r*Vi_prev + a2i*Vr_prev;
+        Vc_pr = ar*Vr_prev - ai*Vi_prev;   Vc_pi = ar*Vi_prev + ai*Vr_prev;
     }
 
     log_info("Simulating: t_end=%.1f t_step=%.3f", t_end, t_step);
@@ -279,16 +284,55 @@ int main(int argc, char **argv)
                 double Vr_n = y[ndiff + 2*osc_idx];
                 double Vi_n = y[ndiff + 2*osc_idx + 1];
 
+                /* per-phase phasors: V_a, V_b, V_c (complex) */
+                double a2r=-0.5, a2i=-0.86602540378, ar=-0.5, ai=0.86602540378;
+
+                /* base: balanced positive-sequence */
+                double Var = Vr_n, Vai = Vi_n;
+                double Vbr = a2r*Vr_n - a2i*Vi_n, Vbi = a2r*Vi_n + a2i*Vr_n;
+                double Vcr = ar*Vr_n - ai*Vi_n, Vci = ar*Vi_n + ai*Vr_n;
+
+                if (sys.fault_bus >= 0 && sys.fault_type > 0 && osc_idx == sys.fault_bus) {
+                    double dVr = sys.fault_Vth_r - Vr_n;
+                    double dVi = sys.fault_Vth_i - Vi_n;
+                    double Ztr = sys.fault_Zth_r, Zti = sys.fault_Zth_i;
+                    double den = Ztr*Ztr + Zti*Zti;
+                    if (den > 1e-20) {
+                        double I1r = (dVr*Ztr + dVi*Zti) / den;
+                        double I1i = (dVi*Ztr - dVr*Zti) / den;
+                        double I2r = 0, I2i = 0, I0r = 0, I0i = 0;
+                        if (sys.fault_type == 1) { I2r=I1r; I2i=I1i; I0r=I1r; I0i=I1i; }
+                        else if (sys.fault_type == 2) { I2r=-I1r; I2i=-I1i; }
+                        else if (sys.fault_type == 3) { I2r=-0.5*I1r; I2i=-0.5*I1i; I0r=-0.5*I1r; I0i=-0.5*I1i; }
+                        double V2r = -(Ztr*I2r - Zti*I2i), V2i = -(Ztr*I2i + Zti*I2r);
+                        double V0r = -(Ztr*I0r - Zti*I0i), V0i = -(Ztr*I0i + Zti*I0r);
+                        Var = Vr_n + V2r + V0r;  Vai = Vi_n + V2i + V0i;
+                        Vbr = (a2r*Vr_n-a2i*Vi_n)+(ar*V2r-ai*V2i)+V0r;
+                        Vbi = (a2r*Vi_n+a2i*Vr_n)+(ar*V2i+ai*V2r)+V0i;
+                        Vcr = (ar*Vr_n-ai*Vi_n)+(a2r*V2r-a2i*V2i)+V0r;
+                        Vci = (ar*Vi_n+ai*Vr_n)+(a2r*V2i+a2i*V2r)+V0i;
+                    }
+                }
+
                 double dt_osc = 0.001;
                 for (double ts = t_prev; ts < t - 1e-10; ts += dt_osc) {
                     double alpha = (ts - t_prev) / (t - t_prev + 1e-20);
-                    double Vr = Vr_prev * (1.0 - alpha) + Vr_n * alpha;
-                    double Vi = Vi_prev * (1.0 - alpha) + Vi_n * alpha;
-                    double va = Vr * cos(wr * ts) - Vi * sin(wr * ts);
-                    double vb = Vr * cos(wr * ts - 2.0943951024) - Vi * sin(wr * ts - 2.0943951024);
-                    double vc = Vr * cos(wr * ts + 2.0943951024) - Vi * sin(wr * ts + 2.0943951024);
+
+                    double var = Va_pr * (1.0-alpha) + Var * alpha;
+                    double vai = Va_pi * (1.0-alpha) + Vai * alpha;
+                    double vbr = Vb_pr * (1.0-alpha) + Vbr * alpha;
+                    double vbi = Vb_pi * (1.0-alpha) + Vbi * alpha;
+                    double vcr = Vc_pr * (1.0-alpha) + Vcr * alpha;
+                    double vci = Vc_pi * (1.0-alpha) + Vci * alpha;
+
+                    double va = var * cos(wr * ts) - vai * sin(wr * ts);
+                    double vb = vbr * cos(wr * ts) - vbi * sin(wr * ts);
+                    double vc = vcr * cos(wr * ts) - vci * sin(wr * ts);
                     fprintf(ofile, "%.6f,%.6f,%.6f,%.6f\n", ts, va, vb, vc);
                 }
+                Va_pr = Var; Va_pi = Vai;
+                Vb_pr = Vbr; Vb_pi = Vbi;
+                Vc_pr = Vcr; Vc_pi = Vci;
                 Vr_prev = Vr_n;
                 Vi_prev = Vi_n;
                 t_prev = t;

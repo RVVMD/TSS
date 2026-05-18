@@ -44,6 +44,9 @@ typedef enum {
     GEN_TRIP     = 4,
     LOAD_SHED    = 5,
     FAULT_CLEAR  = 6,
+    FAULT_SLG    = 7,   /* single-line-to-ground */
+    FAULT_LL     = 8,   /* line-to-line */
+    FAULT_DLG    = 9,   /* double-line-to-ground */
     END_SIM      = 99
 } EventType;
 
@@ -176,6 +179,9 @@ typedef struct {
     /* fault state */
     int     fault_bus;       /* -1 = no fault */
     double  fault_Y_r, fault_Y_i; /* shunt admittance at fault bus */
+    int     fault_type;      /* 0=balanced, 1=SLG, 2=LL, 3=DLG */
+    double  fault_Zth_r, fault_Zth_i; /* Thevenin impedance at fault bus */
+    double  fault_Vth_r, fault_Vth_i; /* Thevenin voltage at fault bus */
 } System;
 
 /* --- DAE --- */
