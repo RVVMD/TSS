@@ -31,7 +31,17 @@ typedef struct {
     double    time;
     int       bus;
     double    fault_r, fault_x;
+    /* tree iter for event list */
+    int       list_idx;
 } GUIEvent;
+
+/* signal tree node data */
+typedef struct {
+    int        sig_idx;    /* index into app->signals, -1 for parent */
+    int        parent_idx; /* index of parent node, -1 for root */
+    int        n_children;
+    gboolean   checked;
+} SigNode;
 
 typedef struct {
     System sys;
@@ -88,8 +98,12 @@ typedef struct {
     char raw_path[512];
     char dyr_path[512];
     char ini_path[512];
+
+    /* track which files have been loaded for editor tabs */
+    int raw_loaded, dyr_loaded, ini_loaded;
 } App;
 
+/* forward declarations */
 static void  app_init(App *app);
 static void  app_cleanup(App *app);
 static void  build_ui(App *app);
@@ -116,10 +130,10 @@ static void  view_select_all(App *app);
 static void  view_select_none(App *app);
 static void  editor_load_file(App *app, int tab);
 static void  editor_save_file(App *app);
+static void  on_btn_run(GtkWidget *btn, App *app);
 static void  on_editor_load(GtkWidget *btn, App *app);
 static void  on_editor_save(GtkWidget *btn, App *app);
-static void  on_btn_run(GtkWidget *btn, App *app);
-
+static void  on_editor_btn_load(GtkWidget *btn, App *app);
 static gpointer sim_thread_fn(gpointer data);
 
 static const char *btype(BusType t) {
@@ -236,7 +250,6 @@ static gboolean on_draw_plot(GtkWidget *widget, cairo_t *cr, gpointer user_data)
         cairo_move_to(cr, px(t) - 12, h - 5);
         cairo_show_text(cr, buf);
     }
-
     cairo_move_to(cr, 2, h - 1);
     cairo_show_text(cr, "Time (s)");
 
@@ -293,7 +306,6 @@ static gboolean on_draw_plot(GtkWidget *widget, cairo_t *cr, gpointer user_data)
     cairo_set_line_width(cr, 1);
     cairo_rectangle(cr, pad, pad, w - 2*pad, h - 2*pad);
     cairo_stroke(cr);
-
     return FALSE;
 }
 
@@ -331,9 +343,9 @@ static gboolean on_plot_button_release(GtkWidget *widget, GdkEventButton *event,
             if (t0 < 0) t0 = 0;
             app->view_t0 = t0;
             app->view_t1 = t1;
-            char buf[64];
-            snprintf(buf, sizeof(buf), "View: %.2f – %.2f s", app->view_t0, app->view_t1);
-            gtk_label_set_text(GTK_LABEL(app->lbl_view_range), buf);
+            char b[64];
+            snprintf(b, sizeof(b), "View: %.2f – %.2f s", app->view_t0, app->view_t1);
+            gtk_label_set_text(GTK_LABEL(app->lbl_view_range), b);
         }
     }
     app->mouse_down = 0;
@@ -359,9 +371,9 @@ static gboolean on_plot_scroll(GtkWidget *widget, GdkEventScroll *event, gpointe
     app->view_t0 = cursor_t - left_frac * new_span * 2;
     app->view_t1 = cursor_t + (1 - left_frac) * new_span * 2;
     if (app->view_t0 < 0) { app->view_t1 -= app->view_t0; app->view_t0 = 0; }
-    char buf[64];
-    snprintf(buf, sizeof(buf), "View: %.2f – %.2f s", app->view_t0, app->view_t1);
-    gtk_label_set_text(GTK_LABEL(app->lbl_view_range), buf);
+    char b[64];
+    snprintf(b, sizeof(b), "View: %.2f – %.2f s", app->view_t0, app->view_t1);
+    gtk_label_set_text(GTK_LABEL(app->lbl_view_range), b);
     gtk_widget_queue_draw(widget);
     return FALSE;
 }
@@ -372,9 +384,9 @@ static void view_zoom_in(App *app) {
     app->view_t0 = mid - span;
     app->view_t1 = mid + span;
     if (app->view_t0 < 0) app->view_t0 = 0;
-    char buf[64];
-    snprintf(buf, sizeof(buf), "View: %.2f – %.2f s", app->view_t0, app->view_t1);
-    gtk_label_set_text(GTK_LABEL(app->lbl_view_range), buf);
+    char b[64];
+    snprintf(b, sizeof(b), "View: %.2f – %.2f s", app->view_t0, app->view_t1);
+    gtk_label_set_text(GTK_LABEL(app->lbl_view_range), b);
     gtk_widget_queue_draw(app->draw_plot);
 }
 
@@ -384,32 +396,30 @@ static void view_zoom_out(App *app) {
     app->view_t0 = mid - span;
     app->view_t1 = mid + span;
     if (app->view_t0 < 0) app->view_t0 = 0;
-    char buf[64];
-    snprintf(buf, sizeof(buf), "View: %.2f – %.2f s", app->view_t0, app->view_t1);
-    gtk_label_set_text(GTK_LABEL(app->lbl_view_range), buf);
+    char b[64];
+    snprintf(b, sizeof(b), "View: %.2f – %.2f s", app->view_t0, app->view_t1);
+    gtk_label_set_text(GTK_LABEL(app->lbl_view_range), b);
     gtk_widget_queue_draw(app->draw_plot);
 }
 
 static void view_fit(App *app) {
     app->view_t0 = 0;
     app->view_t1 = app->sim_t_end > 0 ? app->sim_t_end : app->t_end;
-    char buf[64];
-    snprintf(buf, sizeof(buf), "View: %.2f – %.2f s", app->view_t0, app->view_t1);
-    gtk_label_set_text(GTK_LABEL(app->lbl_view_range), buf);
+    char b[64];
+    snprintf(b, sizeof(b), "View: %.2f – %.2f s", app->view_t0, app->view_t1);
+    gtk_label_set_text(GTK_LABEL(app->lbl_view_range), b);
     gtk_widget_queue_draw(app->draw_plot);
 }
 
 static void view_select_all(App *app) {
-    for (int s = 0; s < app->n_signals; s++) {
+    for (int s = 0; s < app->n_signals; s++)
         app->signals[s].visible = 1;
-    }
     gtk_widget_queue_draw(app->draw_plot);
 }
 
 static void view_select_none(App *app) {
-    for (int s = 0; s < app->n_signals; s++) {
+    for (int s = 0; s < app->n_signals; s++)
         app->signals[s].visible = 0;
-    }
     gtk_widget_queue_draw(app->draw_plot);
 }
 
@@ -468,6 +478,7 @@ static void file_load_raw(App *app) {
         gtk_label_set_text(GTK_LABEL(app->lbl_raw), fn);
         if (raw_parse(fn, &app->sys, &app->arena) == 0) {
             app->sys.fault_bus = -1;
+            app->raw_loaded = 1;
             populate_network(app);
             build_signal_tree(app);
             editor_load_file(app, 0);
@@ -491,6 +502,7 @@ static void file_load_dyr(App *app) {
         gtk_label_set_text(GTK_LABEL(app->lbl_dyr), fn);
         if (dyr_parse(fn, &app->sys, &app->arena) == 0) {
             app->sys_loaded = 1;
+            app->dyr_loaded = 1;
             populate_network(app);
             build_signal_tree(app);
             editor_load_file(app, 1);
@@ -512,8 +524,6 @@ static void file_load_events(App *app) {
         char *fn = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dlg));
         strncpy(app->ini_path, fn, sizeof(app->ini_path) - 1);
         gtk_label_set_text(GTK_LABEL(app->lbl_ini), fn);
-
-        /* parse into temp arena, then copy to heap events */
         Arena tmp = arena_new(1 << 16);
         Event *tmp_ev = NULL;
         if (events_parse(fn, &tmp_ev, &tmp) == 0) {
@@ -525,9 +535,11 @@ static void file_load_events(App *app) {
                 app->events[i].bus = tmp_ev[i].bus;
                 app->events[i].fault_r = tmp_ev[i].fault_r;
                 app->events[i].fault_x = tmp_ev[i].fault_x;
+                app->events[i].list_idx = i;
                 app->n_events++;
             }
             populate_events(app);
+            app->ini_loaded = 1;
             editor_load_file(app, 2);
         }
         arena_free(&tmp);
@@ -538,6 +550,7 @@ static void file_load_events(App *app) {
 
 /* ── network panel ── */
 static void build_network_panel(App *app, GtkWidget **box) {
+    GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
     GtkWidget *nb = gtk_notebook_new();
 
     app->bus_store = gtk_list_store_new(7, G_TYPE_INT, G_TYPE_STRING, G_TYPE_STRING,
@@ -586,7 +599,21 @@ static void build_network_panel(App *app, GtkWidget **box) {
     gtk_container_add(GTK_CONTAINER(sw), app->load_tree);
     gtk_notebook_append_page(GTK_NOTEBOOK(nb), sw, gtk_label_new("Loads"));
 
-    *box = nb;
+    gtk_box_pack_start(GTK_BOX(vbox), nb, TRUE, TRUE, 0);
+
+    /* edit RAW/DYR buttons */
+    GtkWidget *hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    GtkWidget *btn_edit_raw = gtk_button_new_with_label("Edit RAW");
+    GtkWidget *btn_edit_dyr = gtk_button_new_with_label("Edit DYR");
+    g_signal_connect(btn_edit_raw, "clicked", G_CALLBACK(on_editor_btn_load), app);
+    g_signal_connect(btn_edit_dyr, "clicked", G_CALLBACK(on_editor_btn_load), app);
+    g_object_set_data(G_OBJECT(btn_edit_raw), "tab_idx", GINT_TO_POINTER(0));
+    g_object_set_data(G_OBJECT(btn_edit_dyr), "tab_idx", GINT_TO_POINTER(1));
+    gtk_box_pack_start(GTK_BOX(hbox), btn_edit_raw, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(hbox), btn_edit_dyr, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(vbox), hbox, FALSE, FALSE, 0);
+
+    *box = vbox;
 }
 
 static void populate_network(App *app) {
@@ -628,8 +655,41 @@ static void populate_network(App *app) {
     }
 }
 
-/* ── signal tree ── */
+/* ── signal tree with parent-child sync ── */
 enum { SIG_COL_CHECK = 0, SIG_COL_LABEL, SIG_COL_IDX, SIG_N_COLS };
+
+/* Recursively set check state on a tree node and all its children */
+static void sig_set_children(GtkTreeStore *store, GtkTreeIter *parent, gboolean state, App *app) {
+    GtkTreeIter child;
+    if (gtk_tree_model_iter_children(GTK_TREE_MODEL(store), &child, parent)) {
+        do {
+            int idx;
+            gtk_tree_model_get(GTK_TREE_MODEL(store), &child, SIG_COL_IDX, &idx, -1);
+            gtk_tree_store_set(store, &child, SIG_COL_CHECK, state, -1);
+            if (idx >= 0 && idx < app->n_signals)
+                app->signals[idx].visible = state;
+            sig_set_children(store, &child, state, app);
+        } while (gtk_tree_model_iter_next(GTK_TREE_MODEL(store), &child));
+    }
+}
+
+/* Update parent check state based on children */
+static void sig_update_parent(GtkTreeStore *store, GtkTreeIter *parent, App *app) {
+    GtkTreeIter child;
+    int total = 0, checked = 0;
+    if (gtk_tree_model_iter_children(GTK_TREE_MODEL(store), &child, parent)) {
+        do {
+            gboolean c;
+            gtk_tree_model_get(GTK_TREE_MODEL(store), &child, SIG_COL_CHECK, &c, -1);
+            total++;
+            if (c) checked++;
+        } while (gtk_tree_model_iter_next(GTK_TREE_MODEL(store), &child));
+    }
+    if (total > 0) {
+        gboolean state = (checked == total);
+        gtk_tree_store_set(store, parent, SIG_COL_CHECK, state, -1);
+    }
+}
 
 static void sig_toggled(GtkCellRendererToggle *cell, gchar *path_str, gpointer user_data) {
     App *app = (App *)user_data;
@@ -646,9 +706,21 @@ static void sig_toggled(GtkCellRendererToggle *cell, gchar *path_str, gpointer u
 
     int idx;
     gtk_tree_model_get(GTK_TREE_MODEL(app->sig_store), &iter, SIG_COL_IDX, &idx, -1);
-    if (idx >= 0 && idx < app->n_signals)
+    if (idx >= 0 && idx < app->n_signals) {
         app->signals[idx].visible = active;
+    }
+    /* toggle all children */
+    sig_set_children(app->sig_store, &iter, active, app);
 
+    /* update parent */
+    GtkTreePath *parent_path = gtk_tree_path_copy(path);
+    if (gtk_tree_path_up(parent_path)) {
+        GtkTreeIter p_iter;
+        if (gtk_tree_model_get_iter(GTK_TREE_MODEL(app->sig_store), &p_iter, parent_path)) {
+            sig_update_parent(app->sig_store, &p_iter, app);
+        }
+    }
+    gtk_tree_path_free(parent_path);
     gtk_tree_path_free(path);
     gtk_widget_queue_draw(app->draw_plot);
 }
@@ -667,11 +739,11 @@ static void build_signal_tree(App *app) {
         gtk_tree_store_append(app->sig_store, &parent, NULL);
         gtk_tree_store_set(app->sig_store, &parent, SIG_COL_CHECK, FALSE, SIG_COL_LABEL, pl, SIG_COL_IDX, -1, -1);
 
-        struct { SignalType type; const char *fmt; int def; } subs[] = {
-            { SIG_GEN_DELTA, "G%d δ (rad)", 0 },
-            { SIG_GEN_PE,    "G%d Pe (pu)",  0 },
-            { SIG_GEN_OMEGA, "G%d ω (pu)",   0 },
-            { SIG_GEN_VT,    "G%d Vt (pu)",  0 },
+        struct { SignalType type; const char *fmt; } subs[] = {
+            { SIG_GEN_DELTA, "G%d δ (rad)" },
+            { SIG_GEN_PE,    "G%d Pe (pu)"  },
+            { SIG_GEN_OMEGA, "G%d ω (pu)"   },
+            { SIG_GEN_VT,    "G%d Vt (pu)"  },
         };
         for (int j = 0; j < 4 && app->n_signals < MAX_SIGNALS; j++) {
             Signal *sig = &app->signals[app->n_signals];
@@ -679,10 +751,10 @@ static void build_signal_tree(App *app) {
             sig->type = subs[j].type;
             sig->idx = m;
             sig->id = bid;
-            sig->visible = subs[j].def;
+            sig->visible = 0;
             GtkTreeIter child;
             gtk_tree_store_append(app->sig_store, &child, &parent);
-            gtk_tree_store_set(app->sig_store, &child, SIG_COL_CHECK, subs[j].def,
+            gtk_tree_store_set(app->sig_store, &child, SIG_COL_CHECK, FALSE,
                 SIG_COL_LABEL, sig->label, SIG_COL_IDX, app->n_signals, -1);
             app->n_signals++;
         }
@@ -696,9 +768,9 @@ static void build_signal_tree(App *app) {
         gtk_tree_store_append(app->sig_store, &parent, NULL);
         gtk_tree_store_set(app->sig_store, &parent, SIG_COL_CHECK, FALSE, SIG_COL_LABEL, pl, SIG_COL_IDX, -1, -1);
 
-        struct { SignalType type; const char *fmt; int def; } subs[] = {
-            { SIG_BUS_VM, "B%d Vm (pu)",     0 },
-            { SIG_BUS_VA, "B%d angle (deg)", 0 },
+        struct { SignalType type; const char *fmt; } subs[] = {
+            { SIG_BUS_VM, "B%d Vm (pu)" },
+            { SIG_BUS_VA, "B%d angle (deg)" },
         };
         for (int j = 0; j < 2 && app->n_signals < MAX_SIGNALS; j++) {
             Signal *sig = &app->signals[app->n_signals];
@@ -706,10 +778,10 @@ static void build_signal_tree(App *app) {
             sig->type = subs[j].type;
             sig->idx = i;
             sig->id = bid;
-            sig->visible = subs[j].def;
+            sig->visible = 0;
             GtkTreeIter child;
             gtk_tree_store_append(app->sig_store, &child, &parent);
-            gtk_tree_store_set(app->sig_store, &child, SIG_COL_CHECK, subs[j].def,
+            gtk_tree_store_set(app->sig_store, &child, SIG_COL_CHECK, FALSE,
                 SIG_COL_LABEL, sig->label, SIG_COL_IDX, app->n_signals, -1);
             app->n_signals++;
         }
@@ -734,15 +806,19 @@ static void build_event_panel(App *app, GtkWidget **box) {
     gtk_box_pack_start(GTK_BOX(vbox), sw, TRUE, TRUE, 0);
 
     GtkWidget *hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-    GtkWidget *btn_add = gtk_button_new_with_label("Add 3ph Fault");
-    GtkWidget *btn_del = gtk_button_new_with_label("Delete Selected");
+    GtkWidget *btn_add = gtk_button_new_with_label("Add Fault...");
+    GtkWidget *btn_del = gtk_button_new_with_label("Delete");
     GtkWidget *btn_save = gtk_button_new_with_label("Save INI");
+    GtkWidget *btn_edit = gtk_button_new_with_label("Edit INI");
     g_signal_connect(btn_add, "clicked", G_CALLBACK(sim_add_event), app);
     g_signal_connect(btn_del, "clicked", G_CALLBACK(sim_delete_event), app);
     g_signal_connect(btn_save, "clicked", G_CALLBACK(sim_save_events), app);
+    g_signal_connect(btn_edit, "clicked", G_CALLBACK(on_editor_btn_load), app);
+    g_object_set_data(G_OBJECT(btn_edit), "tab_idx", GINT_TO_POINTER(2));
     gtk_box_pack_start(GTK_BOX(hbox), btn_add, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(hbox), btn_del, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(hbox), btn_save, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(hbox), btn_edit, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(vbox), hbox, FALSE, FALSE, 0);
 
     *box = vbox;
@@ -761,11 +837,70 @@ static void populate_events(App *app) {
 }
 
 static void sim_add_event(App *app) {
-    if (app->n_events >= MAX_EVENTS) return;
-    GUIEvent *e = &app->events[app->n_events];
-    e->time = 1.0; e->type = FAULT; e->bus = 1; e->fault_r = 0.001; e->fault_x = 0.001;
-    app->n_events++;
-    populate_events(app);
+    /* dialog to choose fault type */
+    GtkWidget *dlg = gtk_dialog_new_with_buttons("Add Fault",
+        GTK_WINDOW(app->window), GTK_DIALOG_MODAL,
+        "_Cancel", GTK_RESPONSE_CANCEL, "_Add", GTK_RESPONSE_ACCEPT, NULL);
+    GtkWidget *area = gtk_dialog_get_content_area(GTK_DIALOG(dlg));
+    gtk_container_set_border_width(GTK_CONTAINER(area), 10);
+
+    GtkWidget *grid = gtk_grid_new();
+    gtk_grid_set_column_spacing(GTK_GRID(grid), 10);
+    gtk_grid_set_row_spacing(GTK_GRID(grid), 5);
+
+    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Type:"), 0, 0, 1, 1);
+    GtkWidget *combo = gtk_combo_box_text_new();
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(combo), "3-phase fault");
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(combo), "SLG fault");
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(combo), "LL fault");
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(combo), "DLG fault");
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(combo), "Fault clear");
+    gtk_combo_box_set_active(GTK_COMBO_BOX(combo), 0);
+    gtk_grid_attach(GTK_GRID(grid), combo, 1, 0, 1, 1);
+
+    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Time (s):"), 0, 1, 1, 1);
+    GtkWidget *spin_t = gtk_spin_button_new_with_range(0.0, 100.0, 0.01);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(spin_t), 1.0);
+    gtk_grid_attach(GTK_GRID(grid), spin_t, 1, 1, 1, 1);
+
+    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Bus:"), 0, 2, 1, 1);
+    GtkWidget *spin_b = gtk_spin_button_new_with_range(1, 999, 1);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(spin_b), 1);
+    gtk_grid_attach(GTK_GRID(grid), spin_b, 1, 2, 1, 1);
+
+    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("R (pu):"), 0, 3, 1, 1);
+    GtkWidget *spin_r = gtk_spin_button_new_with_range(0.0, 10.0, 0.001);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(spin_r), 0.001);
+    gtk_grid_attach(GTK_GRID(grid), spin_r, 1, 3, 1, 1);
+
+    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("X (pu):"), 0, 4, 1, 1);
+    GtkWidget *spin_x = gtk_spin_button_new_with_range(0.0, 10.0, 0.001);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(spin_x), 0.001);
+    gtk_grid_attach(GTK_GRID(grid), spin_x, 1, 4, 1, 1);
+
+    gtk_box_pack_start(GTK_BOX(area), grid, FALSE, FALSE, 0);
+    gtk_widget_show_all(dlg);
+
+    if (gtk_dialog_run(GTK_DIALOG(dlg)) == GTK_RESPONSE_ACCEPT) {
+        if (app->n_events >= MAX_EVENTS) {
+            GtkWidget *err = gtk_message_dialog_new(GTK_WINDOW(app->window),
+                GTK_DIALOG_MODAL, GTK_MESSAGE_WARNING, GTK_BUTTONS_OK, "Max events reached");
+            gtk_dialog_run(GTK_DIALOG(err)); gtk_widget_destroy(err);
+        } else {
+            int type_idx = gtk_combo_box_get_active(GTK_COMBO_BOX(combo));
+            EventType types[] = { FAULT, FAULT_SLG, FAULT_LL, FAULT_DLG, FAULT_CLEAR };
+            GUIEvent *e = &app->events[app->n_events];
+            e->type = types[type_idx];
+            e->time = gtk_spin_button_get_value(GTK_SPIN_BUTTON(spin_t));
+            e->bus = (int)gtk_spin_button_get_value(GTK_SPIN_BUTTON(spin_b));
+            e->fault_r = gtk_spin_button_get_value(GTK_SPIN_BUTTON(spin_r));
+            e->fault_x = gtk_spin_button_get_value(GTK_SPIN_BUTTON(spin_x));
+            e->list_idx = app->n_events;
+            app->n_events++;
+            populate_events(app);
+        }
+    }
+    gtk_widget_destroy(dlg);
 }
 
 static void sim_delete_event(App *app) {
@@ -806,9 +941,6 @@ static void sim_save_events(App *app) {
 }
 
 /* ── file editor panel ── */
-static void on_editor_load(GtkWidget *btn, App *app) { editor_load_file(app, -1); }
-static void on_editor_save(GtkWidget *btn, App *app) { editor_save_file(app); }
-
 static void build_editor_panel(App *app, GtkWidget **box) {
     GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
 
@@ -840,10 +972,9 @@ static void build_editor_panel(App *app, GtkWidget **box) {
 
     gtk_box_pack_start(GTK_BOX(vbox), app->editor_notebook, TRUE, TRUE, 0);
 
-    /* buttons */
     GtkWidget *hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-    GtkWidget *btn_load = gtk_button_new_with_label("Reload from Disk");
-    GtkWidget *btn_save = gtk_button_new_with_label("Save to Disk");
+    GtkWidget *btn_load = gtk_button_new_with_label("Reload");
+    GtkWidget *btn_save = gtk_button_new_with_label("Save");
     GtkWidget *btn_parse = gtk_button_new_with_label("Re-parse");
     g_signal_connect(btn_load, "clicked", G_CALLBACK(on_editor_load), app);
     g_signal_connect(btn_save, "clicked", G_CALLBACK(on_editor_save), app);
@@ -860,12 +991,34 @@ static void editor_load_file(App *app, int tab) {
     const char *paths[] = { app->raw_path, app->dyr_path, app->ini_path };
     GtkTextBuffer *bufs[] = { app->buf_raw, app->buf_dyr, app->buf_ini };
 
-    int start_t = tab < 0 ? 0 : tab;
-    int end_t = tab < 0 ? 3 : tab + 1;
-    for (int t = start_t; t < end_t; t++) {
-        if (paths[t][0] == '\0') continue;
-        FILE *f = fopen(paths[t], "r");
-        if (!f) continue;
+    /* if called from a button with tab_idx data, use that */
+    int use_tab = tab;
+    /* caller can set tab via g_object_set_data */
+    if (tab == -1) {
+        /* load all loaded tabs */
+        for (int t = 0; t < 3; t++) {
+            if (paths[t][0] == '\0') continue;
+            FILE *f = fopen(paths[t], "r");
+            if (!f) continue;
+            fseek(f, 0, SEEK_END);
+            long sz = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            char *buf = malloc(sz + 1);
+            fread(buf, 1, sz, f);
+            buf[sz] = '\0';
+            fclose(f);
+            GtkTextIter start, end;
+            gtk_text_buffer_get_start_iter(bufs[t], &start);
+            gtk_text_buffer_get_end_iter(bufs[t], &end);
+            gtk_text_buffer_delete(bufs[t], &start, &end);
+            gtk_text_buffer_get_end_iter(bufs[t], &end);
+            gtk_text_buffer_insert(bufs[t], &end, buf, -1);
+            free(buf);
+        }
+    } else {
+        if (paths[tab][0] == '\0') return;
+        FILE *f = fopen(paths[tab], "r");
+        if (!f) return;
         fseek(f, 0, SEEK_END);
         long sz = ftell(f);
         fseek(f, 0, SEEK_SET);
@@ -874,12 +1027,14 @@ static void editor_load_file(App *app, int tab) {
         buf[sz] = '\0';
         fclose(f);
         GtkTextIter start, end;
-        gtk_text_buffer_get_start_iter(bufs[t], &start);
-        gtk_text_buffer_get_end_iter(bufs[t], &end);
-        gtk_text_buffer_delete(bufs[t], &start, &end);
-        gtk_text_buffer_get_end_iter(bufs[t], &end);
-        gtk_text_buffer_insert(bufs[t], &end, buf, -1);
+        gtk_text_buffer_get_start_iter(bufs[tab], &start);
+        gtk_text_buffer_get_end_iter(bufs[tab], &end);
+        gtk_text_buffer_delete(bufs[tab], &start, &end);
+        gtk_text_buffer_get_end_iter(bufs[tab], &end);
+        gtk_text_buffer_insert(bufs[tab], &end, buf, -1);
         free(buf);
+        /* switch to that tab */
+        gtk_notebook_set_current_page(GTK_NOTEBOOK(app->editor_notebook), tab);
     }
 }
 
@@ -916,6 +1071,20 @@ static void on_btn_zoom_out(GtkWidget *btn, App *app) { view_zoom_out(app); }
 static void on_btn_fit(GtkWidget *btn, App *app) { view_fit(app); }
 static void on_btn_sel_all(GtkWidget *btn, App *app) { view_select_all(app); }
 static void on_btn_sel_none(GtkWidget *btn, App *app) { view_select_none(app); }
+
+/* wrapper for editor buttons that pass tab_idx via g_object_set_data */
+static void on_editor_btn_load(GtkWidget *btn, App *app) {
+    int tab = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(btn), "tab_idx"));
+    editor_load_file(app, tab);
+}
+
+static void on_editor_load(GtkWidget *btn, App *app) {
+    editor_load_file(app, -1);
+}
+
+static void on_editor_save(GtkWidget *btn, App *app) {
+    editor_save_file(app);
+}
 
 static void build_sim_panel(App *app, GtkWidget **box) {
     GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
@@ -1235,9 +1404,9 @@ static void sim_run(App *app) {
     snprintf(app->sim_status, sizeof(app->sim_status), "Starting...");
     gtk_widget_set_sensitive(app->btn_run, FALSE);
 
-    char buf[64];
-    snprintf(buf, sizeof(buf), "View: 0.00 – %.2f s", app->t_end);
-    gtk_label_set_text(GTK_LABEL(app->lbl_view_range), buf);
+    char b[64];
+    snprintf(b, sizeof(b), "View: 0.00 – %.2f s", app->t_end);
+    gtk_label_set_text(GTK_LABEL(app->lbl_view_range), b);
 
     g_timeout_add(100, update_progress, app);
     app->sim_thread = g_thread_new("sim", sim_thread_fn, app);
@@ -1281,7 +1450,7 @@ static void build_ui(App *app) {
     GtkWidget *menubar = build_menu(app);
     gtk_box_pack_start(GTK_BOX(vbox), menubar, FALSE, FALSE, 0);
 
-    /* main: left (network + events) | right (sim + editor) */
+    /* main horizontal paned: left | right */
     GtkWidget *hpaned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
 
     /* left: vertical paned: network on top, events on bottom */
@@ -1318,7 +1487,6 @@ static void build_ui(App *app) {
     gtk_container_add(GTK_CONTAINER(ed_frame), ed_box);
     gtk_paned_pack1(GTK_PANED(bottom_hpaned), ed_frame, TRUE, FALSE);
 
-    /* signal tree */
     GtkWidget *sig_frame = gtk_frame_new("Signals");
     GtkWidget *sig_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     app->sig_store = gtk_tree_store_new(SIG_N_COLS, G_TYPE_BOOLEAN, G_TYPE_STRING, G_TYPE_INT);
