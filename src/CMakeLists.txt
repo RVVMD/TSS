@@ -16,7 +16,10 @@ set(LIBSOURCES
     integrator.c
     events.c
     output.c
+    tui.c
 )
+
+find_library(NCURSES_LIB ncurses)
 
 add_library(transient STATIC ${LIBSOURCES})
 target_include_directories(transient PUBLIC
@@ -31,6 +34,7 @@ target_link_libraries(transient PUBLIC
     klu
     m
     lapacke
+    ${NCURSES_LIB}
 )
 
 add_executable(transient-cli ../cli/main.c)
