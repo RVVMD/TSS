@@ -16,7 +16,6 @@ set(LIBSOURCES
     integrator.c
     events.c
     output.c
-    plot.c
 )
 
 add_library(transient STATIC ${LIBSOURCES})

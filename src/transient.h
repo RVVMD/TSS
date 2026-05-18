@@ -34,10 +34,8 @@ int events_post_state(const System *sys, const double *delta, double *V_out);
 CSVWriter *csv_open(const char *path, int ncols, const char **headers);
 void       csv_row(CSVWriter *w, double t, const double *data);
 void       csv_close(CSVWriter *w);
-
-/* --- plot --- */
-int plot_csv(const char *csv_path, const char *png_path,
-             const char *xlabel, const char *ylabel, const char *title,
-             int nseries, const char **labels);
+void       print_network_info(const System *sys);
+void       print_network_dot(const System *sys, const char *path);
+const char *bus_type_name(BusType t);
 
 #endif /* TRANSIENT_H */
