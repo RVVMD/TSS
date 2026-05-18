@@ -71,16 +71,10 @@ static int test_full(char *raw_file, char *dyr_file)
         if (!isfinite(rr[i])) bad = 1;
     }
     printf("PASS: residual ||r||=%.3e  (bad=%d)\n", sqrt(rn), bad);
-    printf("DBG: r[0]=%.3e r[1]=%.3e r[2]=%.3e r[3]=%.3e r[10]=%.3e r[11]=%.3e r[36]=%.3e r[37]=%.3e\n",
-           rr[0], rr[1], rr[2], rr[3], rr[10], rr[11], rr[36], rr[37]);
-    printf("DBG: YV at bus0: re=%.4f im=%.4f  YV at bus1: re=%.4f im=%.4f\n",
-           rr[0] + (2.185 + 0.0), /* YVr = r + Ir */  
-           rr[1] + (0.155 + 0.0),
-           rr[10] + 0.0, rr[11] + 0.0);
+    if (bad) { fprintf(stderr, "FAIL: residual has NaN/Inf\n"); goto fail; }
+
     N_VDestroy(ny); N_VDestroy(nyp); N_VDestroy(nr);
     SUNContext_Free(&ctx);
-
-    if (bad) { fprintf(stderr, "FAIL: residual has NaN/Inf\n"); goto fail; }
 
     memset(&itg, 0, sizeof(itg));
     if (integrator_init(&itg, &dae, 0.0) != 0) {
@@ -90,8 +84,8 @@ static int test_full(char *raw_file, char *dyr_file)
 
     double t = 0.0, tend = 1.0, tret;
     int steps = 0;
-    while (t < tend) {
-        int rc = IDASolve(itg.ida_mem, tend, &tret, itg.nvec_y, itg.nvec_ydot, IDA_ONE_STEP);
+    while (t < tend - 1e-10) {
+        int rc = IDASolve(itg.ida_mem, tend, &tret, itg.nvec_y, itg.nvec_ydot, IDA_NORMAL);
         if (rc < 0) { fprintf(stderr, "FAIL: step at t=%.3f rc=%d\n", t, rc); break; }
         t = tret;
         steps++;
