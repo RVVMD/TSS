@@ -79,29 +79,3 @@ results/
 ├── voltage.png   # gnuplot voltage plot
 └── delta.png     # gnuplot rotor angle plot
 ```
-
-## Architecture
-
-```
-RAW/DYR ─→ Y-bus (CSC sparse) ─→ Power flow (Newton, LAPACKE dgesv)
-                                        │
-                                        ▼
-                                  Machine init (Ep, δ, ω)
-                                        │
-                                        ▼
-                                  DAE assembly (swing + network)
-                                        │
-                         ┌──────────────┴──────────────┐
-                         │  SUNDIALS IDA (BDF1, dense) │
-                         │  + event pipeline:           │
-                         │    ybus_build → solve →     │
-                         │    IDACalcIC → IDAReInit     │
-                         └─────────────────────────────┘
-                                        │
-                                        ▼
-                                   CSV + gnuplot
-```
-
-## License
-
-MIT
