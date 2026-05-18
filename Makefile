@@ -8,7 +8,7 @@ RAW   := tests/data/ieee14.raw
 DYR   := tests/data/ieee14.dyr
 EVTS  := tests/data/fault_ieee14.ini
 OUT   := results
-T_END := 1.3
+T_END := 3.0
 STEP  := 0.01
 
 MPI := mpirun -np 1 --allow-run-as-root
