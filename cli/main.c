@@ -151,6 +151,7 @@ int main(int argc, char **argv)
     double t = 0.0, t_next = t_step, t_prev = 0.0;
     double Vr_prev = 0, Vi_prev = 0;
     double Va_pr = 0, Va_pi = 0, Vb_pr = 0, Vb_pi = 0, Vc_pr = 0, Vc_pi = 0;
+    double Vdc_a = 0, Vdc_b = 0, Vdc_c = 0; /* DC offset magnitudes at fault inception */
     int step = 0, ev_idx = 0;
     int ndiff = dae.ndiff, neq = dae.neq;
 
@@ -190,6 +191,20 @@ int main(int argc, char **argv)
 
         int events_fired = 0;
         while (ev_idx < n_events && events[ev_idx].time <= t + 1e-10) {
+            /* capture pre-fault instantaneous V for DC offset */
+            if (ofile && (events[ev_idx].type == FAULT || events[ev_idx].type == FAULT_SLG
+                || events[ev_idx].type == FAULT_LL || events[ev_idx].type == FAULT_DLG)) {
+                double *ypre = N_VGetArrayPointer(itg.nvec_y);
+                double Vr = ypre[ndiff + 2*osc_idx];
+                double Vi = ypre[ndiff + 2*osc_idx + 1];
+                double wr = 2.0 * M_PI * 60.0;
+                Vdc_a = Vr * cos(wr * t) - Vi * sin(wr * t);
+                Vdc_b = Vr * cos(wr * t - 2.0943951024) - Vi * sin(wr * t - 2.0943951024);
+                Vdc_c = Vr * cos(wr * t + 2.0943951024) - Vi * sin(wr * t + 2.0943951024);
+            }
+            if (ofile && events[ev_idx].type == FAULT_CLEAR) {
+                Vdc_a = 0; Vdc_b = 0; Vdc_c = 0;
+            }
             events_apply(&sys, &events[ev_idx], t);
             ev_idx++;
             events_fired = 1;
@@ -328,6 +343,30 @@ int main(int argc, char **argv)
                     double va = var * cos(wr * ts) - vai * sin(wr * ts);
                     double vb = vbr * cos(wr * ts) - vbi * sin(wr * ts);
                     double vc = vcr * cos(wr * ts) - vci * sin(wr * ts);
+
+                    /* DC aperiodic component: decaying exponential from fault inception */
+                    if (sys.fault_t0 > 0 && ts >= sys.fault_t0 - 1e-10) {
+                        double tau = sys.fault_XoR / (2.0 * M_PI * 60.0);
+                        if (tau < 0.001) tau = 0.005;
+                        double decay = exp(-(ts - sys.fault_t0) / tau);
+                        va -= Vdc_a * decay;
+                        vb -= Vdc_b * decay;
+                        vc -= Vdc_c * decay;
+                    }
+
+                    /* saturation harmonics after fault clear (transformer inrush) */
+                    if (sys.fault_clear_t > 0 && ts >= sys.fault_clear_t - 1e-10) {
+                        double Vm = sqrt(var*var + vai*vai);
+                        double dtc = ts - sys.fault_clear_t;
+                        double harm_env = exp(-dtc / 0.3);  /* decay over ~0.3s */
+                        va += 0.08 * Vm * harm_env * cos(3.0 * wr * ts);
+                        va += 0.04 * Vm * harm_env * cos(5.0 * wr * ts);
+                        vb += 0.08 * Vm * harm_env * cos(3.0 * (wr * ts - 2.0943951024));
+                        vb += 0.04 * Vm * harm_env * cos(5.0 * (wr * ts - 2.0943951024));
+                        vc += 0.08 * Vm * harm_env * cos(3.0 * (wr * ts + 2.0943951024));
+                        vc += 0.04 * Vm * harm_env * cos(5.0 * (wr * ts + 2.0943951024));
+                    }
+
                     fprintf(ofile, "%.6f,%.6f,%.6f,%.6f\n", ts, va, vb, vc);
                 }
                 Va_pr = Var; Va_pi = Vai;

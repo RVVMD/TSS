@@ -182,6 +182,9 @@ typedef struct {
     int     fault_type;      /* 0=balanced, 1=SLG, 2=LL, 3=DLG */
     double  fault_Zth_r, fault_Zth_i; /* Thevenin impedance at fault bus */
     double  fault_Vth_r, fault_Vth_i; /* Thevenin voltage at fault bus */
+    double  fault_t0;        /* fault inception time */
+    double  fault_XoR;       /* X/R ratio at fault bus */
+    double  fault_clear_t;   /* last fault clear time (for inrush) */
 } System;
 
 /* --- DAE --- */

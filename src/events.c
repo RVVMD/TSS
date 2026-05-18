@@ -119,6 +119,8 @@ int events_apply(System *sys, Event *ev, double t)
         sys->fault_Zth_i = Zth_i;
         sys->fault_Vth_r = Vth_r;
         sys->fault_Vth_i = Vth_i;
+        sys->fault_t0    = t;
+        sys->fault_XoR   = (fabs(Zth_r) > 1e-10) ? fabs(Zth_i / Zth_r) : 10.0;
 
         /* effective positive-sequence shunt admittance */
         fault_shunt(Zth_r, Zth_i, zr, zx, ftype,
@@ -131,6 +133,7 @@ int events_apply(System *sys, Event *ev, double t)
     }
     case FAULT_CLEAR:
         log_info("EVENT: fault cleared bus %d", ev->bus);
+        sys->fault_clear_t = t;
         sys->fault_bus = -1;
         sys->fault_type = 0;
         break;

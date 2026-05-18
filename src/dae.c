@@ -27,6 +27,9 @@ int dae_init(DAE *dae, System *sys, Arena *a)
     sys->fault_Y_r  = 0;
     sys->fault_Y_i  = 0;
     sys->fault_type = 0;
+    sys->fault_t0   = -1;
+    sys->fault_XoR  = 5.0;
+    sys->fault_clear_t = -1;
 
     return 0;
 }
