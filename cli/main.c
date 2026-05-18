@@ -8,6 +8,7 @@
 #include <ida/ida.h>
 #include <getopt.h>
 #include <time.h>
+#include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 
@@ -26,6 +27,7 @@ static void usage(const char *prog)
         "=== Simulation ===\n"
         "  --t-end SEC       Simulation duration (default: 10.0)\n"
         "  --t-step SEC      Output interval (default: 0.01)\n"
+        "  --real-time       Sync simulation to wall-clock time\n"
         "\n"
         "=== Output ===\n"
         "  --output DIR      Output directory (default: ./results)\n"
@@ -84,6 +86,7 @@ int main(int argc, char **argv)
     const char *output_dir = "results", *topo_file = NULL;
     double t_end = 10.0, t_step = 0.01;
     int do_plot = 0, osc_bus = -1, do_info = 0, do_diagram = 0;
+    int realtime = 0;
     int plot_w = 2400, plot_h = 1600;
 
     static struct option long_opts[] = {
@@ -96,6 +99,7 @@ int main(int argc, char **argv)
         {"osc",    required_argument, 0, 'O'},
         {"plot",   no_argument,       0, 'p'},
         {"res",    required_argument, 0, 'R'},
+        {"real-time", no_argument,    0, 'Z'},
         {"info",   no_argument,       0, 'I'},
         {"diagram",no_argument,       0, 'D'},
         {"topo",   required_argument, 0, 'G'},
@@ -104,7 +108,7 @@ int main(int argc, char **argv)
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "r:d:T:s:e:o:O:R:I:D:G:ph", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "r:d:T:s:e:o:O:R:Z:I:D:G:ph", long_opts, NULL)) != -1) {
         switch (opt) {
         case 'r': raw_file    = optarg; break;
         case 'd': dyr_file    = optarg; break;
@@ -114,6 +118,7 @@ int main(int argc, char **argv)
         case 'o': output_dir  = optarg; break;
         case 'O': osc_bus     = atoi(optarg); break;
         case 'R': sscanf(optarg, "%dx%d", &plot_w, &plot_h); break;
+        case 'Z': realtime    = 1; break;
         case 'I': do_info     = 1; break;
         case 'D': do_diagram  = 1; break;
         case 'G': topo_file   = optarg; break;
@@ -239,10 +244,15 @@ int main(int argc, char **argv)
         Vc_pr = ar*Vr_prev - ai*Vi_prev;   Vc_pi = ar*Vi_prev + ai*Vr_prev;
     }
 
-    log_info("Simulating: t_end=%.1f t_step=%.3f", t_end, t_step);
-    clock_t t_start = clock();
+    log_info("Simulating: t_end=%.1f t_step=%.3f%s",
+             t_end, t_step, realtime ? " [REAL-TIME]" : "");
+
+    double t_rt = 0.0;  /* last simulated time for real-time tracking */
 
     while (t < t_end - 1e-10) {
+        struct timespec step_start;
+        if (realtime) clock_gettime(CLOCK_MONOTONIC, &step_start);
+
         double tout = t_next;
         if (tout > t_end) tout = t_end;
 
@@ -437,23 +447,32 @@ int main(int argc, char **argv)
         step++;
         while (t_next <= t + 1e-10) t_next += t_step;
 
-        /* real-time progress bar */
+        /* progress bar + real-time sync */
         {
             double pct = (t / t_end) * 100.0;
-            double elapsed = (double)(clock() - t_start) / CLOCKS_PER_SEC;
-            double eta = (pct > 0.01) ? elapsed * (100.0 / pct - 1.0) : 0;
+
+            if (realtime) {
+                struct timespec now;
+                clock_gettime(CLOCK_MONOTONIC, &now);
+                double step_wall = (now.tv_sec - step_start.tv_sec)
+                                 + (now.tv_nsec - step_start.tv_nsec) * 1e-9;
+                double lag = (t - t_rt) - step_wall;
+                if (lag > 0.0001) usleep((useconds_t)(lag * 1e6));
+                t_rt = t;
+            }
+
             int bar_w = 30, filled = (int)(pct * bar_w / 100.0);
             fprintf(stderr, "\r[");
             for (int b = 0; b < bar_w; b++) fputc(b < filled ? '=' : (b == filled ? '>' : ' '), stderr);
-            fprintf(stderr, "] %5.1f%% t=%.2fs elapsed=%.1fs ETA=%.1fs   ",
-                    pct, t, elapsed, eta);
+            fprintf(stderr, "] %5.1f%% t=%.2fs %s   ",
+                    pct, t, realtime ? "[RT]" : "");
             fflush(stderr);
         }
     }
 
     fprintf(stderr, "\r[==============================] 100.0%%  Done: t=%.4f steps=%d\n\n", t, step);
 
-    log_info("Done: t=%.4f steps=%d", t, step);
+            log_info("Done: t=%.4f steps=%d", t, step);
 
     /* post-simulation summary */
     printf("\n--- SIMULATION SUMMARY ---\n");
