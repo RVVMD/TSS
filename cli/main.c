@@ -1,5 +1,4 @@
 #include "transient.h"
-#include "tui.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -82,22 +81,6 @@ typedef struct {
 int main(int argc, char **argv)
 {
     MPI_Init(NULL, NULL);
-
-    /* if no arguments, launch TUI (primary mode) */
-    int use_tui = 0;
-    for (int i = 1; i < argc; i++)
-        if (!strcmp(argv[i], "--tui")) { use_tui = 1; break; }
-
-    if (argc == 1 || use_tui) {
-        int rc = tui_main();
-        MPI_Finalize();
-        return rc;
-    }
-
-    /* check for --cli flag (explicit CLI mode) */
-    int use_cli = 0;
-    for (int i = 1; i < argc; i++)
-        if (!strcmp(argv[i], "--cli")) { use_cli = 1; break; }
 
     const char *raw_file = NULL, *dyr_file = NULL, *events_file = NULL;
     const char *output_dir = "results", *topo_file = NULL;
