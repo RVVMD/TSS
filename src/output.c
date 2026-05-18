@@ -139,3 +139,73 @@ void print_network_dot(const System *sys, const char *path)
     fclose(fp);
     log_info("DOT topology written to %s", path);
 }
+
+/* ── ASCII one-line network diagram ── */
+void print_network_diagram(const System *sys)
+{
+    printf("\n======== NETWORK ONE-LINE DIAGRAM ========\n\n");
+
+    int namelen = 0;
+    for (int i = 0; i < sys->nbus; i++) {
+        int n = (int)strlen(sys->bus[i].name);
+        if (n > namelen) namelen = n;
+    }
+    if (namelen > 14) namelen = 14;
+
+    for (int i = 0; i < sys->nbus; i++) {
+        const Bus *bus = &sys->bus[i];
+        const char *sym = "○";
+        if (bus->type == BUS_SLACK) sym = "⊚";
+        else if (bus->type == BUS_PV) sym = "◎";
+
+        printf(" %s Bus %-2d %-*s [%5s %5.1fkV]",
+               sym, bus->id, namelen, bus->name,
+               bus_type_name(bus->type), bus->base_kv);
+
+        for (int g = 0; g < sys->ngen; g++)
+            if (sys->gen[g].bus == i)
+                printf("  ⚡G%d=%.0fMW", sys->gen[g].id,
+                       sys->gen[g].pg * sys->base_mva);
+
+        if (fabs(bus->pd) > 1e-4 || fabs(bus->qd) > 1e-4)
+            printf("  ⎌%.0f+j%.0fMVA", bus->pd * sys->base_mva,
+                   bus->qd * sys->base_mva);
+        printf("\n");
+
+        int conn = 0;
+        for (int b = 0; b < sys->nbranch; b++) {
+            const Branch *br = &sys->branch[b];
+            if (!br->status) continue;
+            int nb = -1;
+            if (br->from == i) nb = br->to;
+            else if (br->to == i) nb = br->from;
+            if (nb < 0) continue;
+            conn++;
+        }
+
+        int c = 0;
+        for (int b = 0; b < sys->nbranch; b++) {
+            const Branch *br = &sys->branch[b];
+            if (!br->status) continue;
+            int nb = -1;
+            if (br->from == i) nb = br->to;
+            else if (br->to == i) nb = br->from;
+            if (nb < 0) continue;
+            c++;
+
+            char pre[9] = "  ├─";
+            if (c == conn) snprintf(pre, sizeof(pre), "  └─");
+
+            printf("%s R=%.4f X=%.4f", pre, br->r, br->x);
+            if (fabs(br->tap - 1.0) > 1e-6) printf(" tap=%.3f", br->tap);
+            printf(" → %s Bus %d\n", bus_type_name(sys->bus[nb].type),
+                   sys->bus[nb].id);
+        }
+        printf("\n");
+    }
+
+    printf("════ Legend ════\n");
+    printf("  ⊚ Slack    ◎ PV    ○ PQ\n");
+    printf("  ⚡ Generator    ⎌ Load (MVA on %g MVA base)\n", sys->base_mva);
+    printf("  R and X in per-unit\n\n");
+}

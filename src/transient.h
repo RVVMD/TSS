@@ -36,6 +36,7 @@ void       csv_row(CSVWriter *w, double t, const double *data);
 void       csv_close(CSVWriter *w);
 void       print_network_info(const System *sys);
 void       print_network_dot(const System *sys, const char *path);
+void       print_network_diagram(const System *sys);
 const char *bus_type_name(BusType t);
 
 #endif /* TRANSIENT_H */

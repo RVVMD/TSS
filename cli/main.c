@@ -33,6 +33,7 @@ static void usage(const char *prog)
         "\n"
         "=== Inspection (no simulation) ===\n"
         "  --info            Print network topology report\n"
+        "  --diagram         Print ASCII one-line network diagram\n"
         "  --topo FILE       Export Graphviz DOT topology graph\n"
         "\n"
         "=== Examples ===\n"
@@ -80,7 +81,7 @@ int main(int argc, char **argv)
     const char *raw_file = NULL, *dyr_file = NULL, *events_file = NULL;
     const char *output_dir = "results", *topo_file = NULL;
     double t_end = 10.0, t_step = 0.01;
-    int do_plot = 0, osc_bus = -1, do_info = 0;
+    int do_plot = 0, osc_bus = -1, do_info = 0, do_diagram = 0;
 
     static struct option long_opts[] = {
         {"raw",    required_argument, 0, 'r'},
@@ -92,13 +93,14 @@ int main(int argc, char **argv)
         {"osc",    required_argument, 0, 'O'},
         {"plot",   no_argument,       0, 'p'},
         {"info",   no_argument,       0, 'I'},
+        {"diagram",no_argument,       0, 'D'},
         {"topo",   required_argument, 0, 'G'},
         {"help",   no_argument,       0, 'h'},
         {0,0,0,0}
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "r:d:T:s:e:o:O:I:G:ph", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "r:d:T:s:e:o:O:I:D:G:ph", long_opts, NULL)) != -1) {
         switch (opt) {
         case 'r': raw_file    = optarg; break;
         case 'd': dyr_file    = optarg; break;
@@ -108,6 +110,7 @@ int main(int argc, char **argv)
         case 'o': output_dir  = optarg; break;
         case 'O': osc_bus     = atoi(optarg); break;
         case 'I': do_info     = 1; break;
+        case 'D': do_diagram  = 1; break;
         case 'G': topo_file   = optarg; break;
         case 'p': do_plot     = 1; break;
         case 'h': usage(argv[0]); MPI_Finalize(); return 0;
@@ -129,6 +132,9 @@ int main(int argc, char **argv)
 
     /* --info: print topology and exit */
     if (do_info) { print_network_info(&sys); MPI_Finalize(); return 0; }
+
+    /* --diagram: print one-line diagram and exit */
+    if (do_diagram) { print_network_diagram(&sys); MPI_Finalize(); return 0; }
 
     /* --topo: export DOT and exit */
     if (topo_file) { print_network_dot(&sys, topo_file); MPI_Finalize(); return 0; }
