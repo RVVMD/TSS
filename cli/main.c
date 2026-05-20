@@ -32,6 +32,7 @@ static void usage(const char *prog)
         "=== Output ===\n"
         "  --output DIR      Output directory (default: ./results)\n"
         "  --osc BUS         3-phase oscillogram at 1 kHz\n"
+        "  --comtrade BUS    3-phase COMTRADE (IEEE C37.111) with real-world units\n"
         "  --plot            Generate gnuplot PNGs\n"
         "  --res WxH         Plot resolution (default: 2400x1600)\n"
         "\n"
@@ -56,6 +57,25 @@ static void usage(const char *prog)
         "  %s --raw ieee14.raw --dyr ieee14.dyr \\\n"
         "      --topo network.dot\n"
         "\n", prog, prog, prog, prog, prog, prog);
+}
+
+static void rotate_3ph(double *va_r, double *va_i, double *vb_r, double *vb_i,
+                        double *vc_r, double *vc_i, int fault_phase)
+{
+    (void)va_r; (void)va_i;
+    if (fault_phase == FAULT_PHASE_ABC || fault_phase == FAULT_PHASE_BC ||
+        fault_phase == FAULT_PHASE_AG) return;
+    double tr = *va_r, ti = *va_i;
+    double br = *vb_r, bi = *vb_i;
+    double cr = *vc_r, ci = *vc_i;
+    switch (fault_phase) {
+    case FAULT_PHASE_AB:
+    case FAULT_PHASE_CG:
+        *va_r = br; *va_i = bi; *vb_r = cr; *vb_i = ci; *vc_r = tr; *vc_i = ti; break;
+    case FAULT_PHASE_CA:
+    case FAULT_PHASE_BG:
+        *va_r = cr; *va_i = ci; *vb_r = tr; *vb_i = ti; *vc_r = br; *vc_i = bi; break;
+    }
 }
 
 static FILE *open_out(const char *dir, const char *name)
@@ -86,6 +106,7 @@ int main(int argc, char **argv)
     const char *output_dir = "results", *topo_file = NULL;
     double t_end = 10.0, t_step = 0.01;
     int do_plot = 0, osc_bus = -1, do_info = 0, do_diagram = 0;
+    int comtrade_bus = -1;
     int realtime = 0;
     int plot_w = 2400, plot_h = 1600;
 
@@ -97,6 +118,7 @@ int main(int argc, char **argv)
         {"events", required_argument, 0, 'e'},
         {"output", required_argument, 0, 'o'},
         {"osc",    required_argument, 0, 'O'},
+        {"comtrade", required_argument, 0, 'C'},
         {"plot",   no_argument,       0, 'p'},
         {"res",    required_argument, 0, 'R'},
         {"real-time", no_argument,    0, 'Z'},
@@ -108,7 +130,7 @@ int main(int argc, char **argv)
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "r:d:T:s:e:o:O:R:Z:I:D:G:ph", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "r:d:T:s:e:o:O:C:R:Z:I:D:G:ph", long_opts, NULL)) != -1) {
         switch (opt) {
         case 'r': raw_file    = optarg; break;
         case 'd': dyr_file    = optarg; break;
@@ -117,6 +139,7 @@ int main(int argc, char **argv)
         case 'e': events_file = optarg; break;
         case 'o': output_dir  = optarg; break;
         case 'O': osc_bus     = atoi(optarg); break;
+        case 'C': comtrade_bus = atoi(optarg); break;
         case 'R': sscanf(optarg, "%dx%d", &plot_w, &plot_h); break;
         case 'Z': realtime    = 1; break;
         case 'I': do_info     = 1; break;
@@ -217,10 +240,43 @@ int main(int argc, char **argv)
         } else log_warn("osc bus %d not found", osc_bus);
     }
 
+    /* COMTRADE output */
+    ComtradeWriter *ctw = NULL;
+    int ct_idx = -1;
+    if (comtrade_bus > 0) {
+        for (int i = 0; i < sys.nbus; i++)
+            if (sys.bus[i].id == comtrade_bus) { ct_idx = i; break; }
+        if (ct_idx >= 0) {
+            ctw = comtrade_create(sys.bus[ct_idx].name, "TSS");
+            double v_factor = comtrade_v_factor(sys.bus[ct_idx].base_kv);
+            double i_factor = comtrade_i_factor(sys.base_mva, sys.bus[ct_idx].base_kv);
+            double v_prim = sys.bus[ct_idx].base_kv * 1000.0;
+            double i_prim_a = sys.base_mva * 1000.0 / (sqrt(3.0) * sys.bus[ct_idx].base_kv);
+            double min_v = -2.5, max_v = 2.5;
+            double min_i = -10.0, max_i = 10.0;
+            char id[32]; int bid = comtrade_bus;
+            snprintf(id, sizeof(id), "V%da", bid); comtrade_add_analog(ctw, id, "A", sys.bus[ct_idx].name, "kV", v_factor, 0, min_v, max_v, v_prim, 100.0, 0);
+            snprintf(id, sizeof(id), "V%db", bid); comtrade_add_analog(ctw, id, "B", sys.bus[ct_idx].name, "kV", v_factor, 0, min_v, max_v, v_prim, 100.0, 0);
+            snprintf(id, sizeof(id), "V%dc", bid); comtrade_add_analog(ctw, id, "C", sys.bus[ct_idx].name, "kV", v_factor, 0, min_v, max_v, v_prim, 100.0, 0);
+            snprintf(id, sizeof(id), "I%da", bid); comtrade_add_analog(ctw, id, "A", sys.bus[ct_idx].name, "kA", i_factor, 0, min_i, max_i, i_prim_a, 5.0, 0);
+            snprintf(id, sizeof(id), "I%db", bid); comtrade_add_analog(ctw, id, "B", sys.bus[ct_idx].name, "kA", i_factor, 0, min_i, max_i, i_prim_a, 5.0, 0);
+            snprintf(id, sizeof(id), "I%dc", bid); comtrade_add_analog(ctw, id, "C", sys.bus[ct_idx].name, "kA", i_factor, 0, min_i, max_i, i_prim_a, 5.0, 0);
+            char cpath[1024], dpath[1024];
+            snprintf(cpath, sizeof(cpath), "%s/comtrade_bus%d.cfg", output_dir, comtrade_bus);
+            snprintf(dpath, sizeof(dpath), "%s/comtrade_bus%d.dat", output_dir, comtrade_bus);
+            comtrade_open_dat(ctw, dpath);
+            comtrade_set_time(ctw, 2026,1,1,0,0,0,0, 2026,1,1,0,0,0,0);
+            ctw->sample_rate = 1000;
+        } else log_warn("comtrade bus %d not found", comtrade_bus);
+    }
+
     double t = 0.0, t_next = t_step, t_prev = 0.0;
     double Vr_prev = 0, Vi_prev = 0;
+    double Ir_prev = 0, Ii_prev = 0;
     double Va_pr = 0, Va_pi = 0, Vb_pr = 0, Vb_pi = 0, Vc_pr = 0, Vc_pi = 0;
+    double Ia_pr = 0, Ia_pi = 0, Ib_pr = 0, Ib_pi = 0, Ic_pr = 0, Ic_pi = 0;
     double Vdc_a = 0, Vdc_b = 0, Vdc_c = 0;
+    double Idc_a = 0, Idc_b = 0, Idc_c = 0;
     int step = 0, ev_idx = 0;
     int ndiff = dae.ndiff, neq = dae.neq;
 
@@ -234,14 +290,31 @@ int main(int argc, char **argv)
         gstat[m].pe_min = 1e30;
     }
 
-    if (osc_idx >= 0) {
+    if (osc_idx >= 0 || ct_idx >= 0) {
         double *y0 = N_VGetArrayPointer(itg.nvec_y);
-        Vr_prev = y0[ndiff + 2*osc_idx];
-        Vi_prev = y0[ndiff + 2*osc_idx + 1];
+        int idx = (osc_idx >= 0) ? osc_idx : ct_idx;
+        Vr_prev = y0[ndiff + 2*idx];
+        Vi_prev = y0[ndiff + 2*idx + 1];
         double a2r=-0.5, a2i=-0.86602540378, ar=-0.5, ai=0.86602540378;
         Va_pr = Vr_prev; Va_pi = Vi_prev;
         Vb_pr = a2r*Vr_prev - a2i*Vi_prev; Vb_pi = a2r*Vi_prev + a2i*Vr_prev;
         Vc_pr = ar*Vr_prev - ai*Vi_prev;   Vc_pi = ar*Vi_prev + ai*Vr_prev;
+    }
+    if (ct_idx >= 0) {
+        double *y0 = N_VGetArrayPointer(itg.nvec_y);
+        int bi = ct_idx;
+        Ir_prev = 0; Ii_prev = 0;
+        for (int k = sys.colptr[bi]; k < sys.colptr[bi+1]; k++) {
+            int j = sys.rowidx[k];
+            double Gij = sys.yval[2*k], Bij = sys.yval[2*k+1];
+            double Vr_j = y0[ndiff + 2*j], Vi_j = y0[ndiff + 2*j+1];
+            Ir_prev += Gij*Vr_j - Bij*Vi_j;
+            Ii_prev += Gij*Vi_j + Bij*Vr_j;
+        }
+        double a2r=-0.5, a2i=-0.86602540378, ar=-0.5, ai=0.86602540378;
+        Ia_pr = Ir_prev; Ia_pi = Ii_prev;
+        Ib_pr = a2r*Ir_prev - a2i*Ii_prev; Ib_pi = a2r*Ii_prev + a2i*Ir_prev;
+        Ic_pr = ar*Ir_prev - ai*Ii_prev;   Ic_pi = ar*Ii_prev + ai*Ir_prev;
     }
 
     log_info("Simulating: t_end=%.1f t_step=%.3f%s",
@@ -270,17 +343,32 @@ int main(int argc, char **argv)
 
         int events_fired = 0;
         while (ev_idx < n_events && events[ev_idx].time <= t + 1e-10) {
-            if (ofile && (events[ev_idx].type == FAULT || events[ev_idx].type == FAULT_SLG
+            if ((ofile || ctw) && (events[ev_idx].type == FAULT || events[ev_idx].type == FAULT_SLG
                 || events[ev_idx].type == FAULT_LL || events[ev_idx].type == FAULT_DLG)) {
                 double *ypre = N_VGetArrayPointer(itg.nvec_y);
-                double Vr = ypre[ndiff + 2*osc_idx], Vi = ypre[ndiff + 2*osc_idx + 1];
+                int vidx = osc_idx >= 0 ? osc_idx : (ct_idx >= 0 ? ct_idx : 0);
+                double Vr = ypre[ndiff + 2*vidx], Vi = ypre[ndiff + 2*vidx + 1];
                 double wr = 2.0 * M_PI * 60.0;
                 Vdc_a = Vr * cos(wr * t) - Vi * sin(wr * t);
                 Vdc_b = Vr * cos(wr * t - 2.0943951024) - Vi * sin(wr * t - 2.0943951024);
                 Vdc_c = Vr * cos(wr * t + 2.0943951024) - Vi * sin(wr * t + 2.0943951024);
+                if (ct_idx >= 0) {
+                    int bi = ct_idx;
+                    double Ir = 0, Ii = 0;
+                    for (int k = sys.colptr[bi]; k < sys.colptr[bi+1]; k++) {
+                        int j = sys.rowidx[k];
+                        double Gij = sys.yval[2*k], Bij = sys.yval[2*k+1];
+                        double Vr_j = ypre[ndiff + 2*j], Vi_j = ypre[ndiff + 2*j+1];
+                        Ir += Gij*Vr_j - Bij*Vi_j;
+                        Ii += Gij*Vi_j + Bij*Vr_j;
+                    }
+                    Idc_a = Ir * cos(wr * t) - Ii * sin(wr * t);
+                    Idc_b = Ir * cos(wr * t - 2.0943951024) - Ii * sin(wr * t - 2.0943951024);
+                    Idc_c = Ir * cos(wr * t + 2.0943951024) - Ii * sin(wr * t + 2.0943951024);
+                }
             }
-            if (ofile && events[ev_idx].type == FAULT_CLEAR)
-                { Vdc_a = 0; Vdc_b = 0; Vdc_c = 0; }
+            if ((ofile || ctw) && events[ev_idx].type == FAULT_CLEAR)
+                { Vdc_a = 0; Vdc_b = 0; Vdc_c = 0; Idc_a = 0; Idc_b = 0; Idc_c = 0; }
             events_apply(&sys, &events[ev_idx], t);
             ev_idx++; events_fired = 1;
         }
@@ -311,28 +399,6 @@ int main(int argc, char **argv)
                     ypd[2*m]   = ws * (om - 1.0);
                     ypd[2*m+1] = ws / TwoH * (gen->pg - Pe - mc->d*(om-1.0));
                 }
-                double *y_save = malloc((size_t)neq * sizeof(double));
-                memcpy(y_save, ydata, (size_t)neq * sizeof(double));
-                int icr = IDACalcIC(itg.ida_mem, IDA_Y_INIT, 0.01);
-                if (icr != 0) {
-                    memcpy(ydata, y_save, (size_t)neq * sizeof(double));
-                    memset(ypd, 0, (size_t)neq * sizeof(double));
-                    for (int m = 0; m < sys.nmachines; m++) {
-                        Machine *mc = &sys.machine[m];
-                        Gen *gen = &sys.gen[mc->gen_idx];
-                        int bi = gen->bus;
-                        double Vr = ydata[ndiff + 2*bi], Vi = ydata[ndiff + 2*bi+1];
-                        double d = ydata[2*m], Ep = mc->Ep, xdp = mc->xdp;
-                        double Pe = Vr*(Ep*sin(d)-Vi)/xdp + Vi*(-(Ep*cos(d)-Vr))/xdp;
-                        double TwoH = 2.0 * mc->h;
-                        double om = ydata[2*m+1];
-                        if (om < 0.1 || om > 2.0) om = 1.0;
-                        ypd[2*m]   = ws * (om - 1.0);
-                        ypd[2*m+1] = ws / TwoH * (gen->pg - Pe - mc->d*(om-1.0));
-                    }
-                    log_warn("EVENT: IDACalcIC failed (%d), restored clean state", icr);
-                }
-                free(y_save);
                 IDASetMaxOrd(itg.ida_mem, 1);
                 int rrc = IDAReInit(itg.ida_mem, t, itg.nvec_y, itg.nvec_ydot);
                 IDASStolerances(itg.ida_mem, 1e-4, 1e-6);
@@ -384,18 +450,36 @@ int main(int argc, char **argv)
                 fprintf(dfile, "\n");
             }
 
-            /* 3-phase oscillogram at 1 kHz */
-            if (ofile) {
+            /* 3-phase oscillogram + COMTRADE at 1 kHz */
+            if (ofile || ctw) {
                 double wr = 2.0 * M_PI * 60.0;
-                double Vr_n = y[ndiff + 2*osc_idx];
-                double Vi_n = y[ndiff + 2*osc_idx + 1];
+                int vidx = osc_idx >= 0 ? osc_idx : (ct_idx >= 0 ? ct_idx : 0);
+                double Vr_n = y[ndiff + 2*vidx];
+                double Vi_n = y[ndiff + 2*vidx + 1];
+
+                double Ir_n = 0, Ii_n = 0;
+                if (ct_idx >= 0) {
+                    int bi = ct_idx;
+                    for (int k = sys.colptr[bi]; k < sys.colptr[bi+1]; k++) {
+                        int j = sys.rowidx[k];
+                        double Gij = sys.yval[2*k], Bij = sys.yval[2*k+1];
+                        double Vr_j = y[ndiff + 2*j], Vi_j = y[ndiff + 2*j+1];
+                        Ir_n += Gij*Vr_j - Bij*Vi_j;
+                        Ii_n += Gij*Vi_j + Bij*Vr_j;
+                    }
+                }
+
                 double a2r=-0.5, a2i=-0.86602540378, ar=-0.5, ai=0.86602540378;
 
                 double Var = Vr_n, Vai = Vi_n;
                 double Vbr = a2r*Vr_n - a2i*Vi_n, Vbi = a2r*Vi_n + a2i*Vr_n;
                 double Vcr = ar*Vr_n - ai*Vi_n, Vci = ar*Vi_n + ai*Vr_n;
 
-                if (sys.fault_bus >= 0 && sys.fault_type > 0 && osc_idx == sys.fault_bus) {
+                double Iar = Ir_n, Iai = Ii_n;
+                double Ibr = a2r*Ir_n - a2i*Ii_n, Ibi = a2r*Ii_n + a2i*Ir_n;
+                double Icr = ar*Ir_n - ai*Ii_n, Ici = ar*Ii_n + ai*Ir_n;
+
+                if (sys.fault_bus >= 0 && sys.fault_type > 0 && vidx == sys.fault_bus) {
                     double dVr = sys.fault_Vth_r - Vr_n;
                     double dVi = sys.fault_Vth_i - Vi_n;
                     double Ztr = sys.fault_Zth_r, Zti = sys.fault_Zth_i;
@@ -408,9 +492,15 @@ int main(int argc, char **argv)
                         else if (sys.fault_type == 3) { I2r=-0.5*I1r; I2i=-0.5*I1i; I0r=-0.5*I1r; I0i=-0.5*I1i; }
                         double V2r = -(Ztr*I2r-Zti*I2i), V2i = -(Ztr*I2i+Zti*I2r);
                         double V0r = -(Ztr*I0r-Zti*I0i), V0i = -(Ztr*I0i+Zti*I0r);
+                        double I_f2r = I2r, I_f2i = I2i, I_f0r = I0r, I_f0i = I0i;
                         Var=Vr_n+V2r+V0r; Vai=Vi_n+V2i+V0i;
                         Vbr=(a2r*Vr_n-a2i*Vi_n)+(ar*V2r-ai*V2i)+V0r; Vbi=(a2r*Vi_n+a2i*Vr_n)+(ar*V2i+ai*V2r)+V0i;
                         Vcr=(ar*Vr_n-ai*Vi_n)+(a2r*V2r-a2i*V2i)+V0r; Vci=(ar*Vi_n+ai*Vr_n)+(a2r*V2i+a2i*V2r)+V0i;
+                        Iar=Ir_n+I_f2r+I_f0r; Iai=Ii_n+I_f2i+I_f0i;
+                        Ibr=(a2r*Ir_n-a2i*Ii_n)+(ar*I_f2r-ai*I_f2i)+I_f0r; Ibi=(a2r*Ii_n+a2i*Ir_n)+(ar*I_f2i+ai*I_f2r)+I_f0i;
+                        Icr=(ar*Ir_n-ai*Ii_n)+(a2r*I_f2r-a2i*I_f2i)+I_f0r; Ici=(ar*Ii_n+ai*Ir_n)+(a2r*I_f2i+a2i*I_f2r)+I_f0i;
+                        rotate_3ph(&Var,&Vai,&Vbr,&Vbi,&Vcr,&Vci, sys.fault_phase);
+                        rotate_3ph(&Iar,&Iai,&Ibr,&Ibi,&Icr,&Ici, sys.fault_phase);
                     }
                 }
 
@@ -419,16 +509,23 @@ int main(int argc, char **argv)
                     double var = Va_pr*(1-alpha) + Var*alpha, vai = Va_pi*(1-alpha) + Vai*alpha;
                     double vbr = Vb_pr*(1-alpha) + Vbr*alpha, vbi = Vb_pi*(1-alpha) + Vbi*alpha;
                     double vcr = Vc_pr*(1-alpha) + Vcr*alpha, vci = Vc_pi*(1-alpha) + Vci*alpha;
+                    double iar = Ia_pr*(1-alpha) + Iar*alpha, iai = Ia_pi*(1-alpha) + Iai*alpha;
+                    double ibr = Ib_pr*(1-alpha) + Ibr*alpha, ibi = Ib_pi*(1-alpha) + Ibi*alpha;
+                    double icr = Ic_pr*(1-alpha) + Icr*alpha, ici = Ic_pi*(1-alpha) + Ici*alpha;
 
                     double va = var*cos(wr*ts) - vai*sin(wr*ts);
                     double vb = vbr*cos(wr*ts) - vbi*sin(wr*ts);
                     double vc = vcr*cos(wr*ts) - vci*sin(wr*ts);
+                    double ia = iar*cos(wr*ts) - iai*sin(wr*ts);
+                    double ib = ibr*cos(wr*ts) - ibi*sin(wr*ts);
+                    double ic = icr*cos(wr*ts) - ici*sin(wr*ts);
 
                     if (sys.fault_t0 > 0 && ts >= sys.fault_t0 - 1e-10) {
                         double tau = sys.fault_XoR / (2.0*M_PI*60.0);
                         if (tau < 0.001) tau = 0.005;
                         double dcy = exp(-(ts - sys.fault_t0) / tau);
                         va -= Vdc_a * dcy; vb -= Vdc_b * dcy; vc -= Vdc_c * dcy;
+                        ia -= Idc_a * dcy; ib -= Idc_b * dcy; ic -= Idc_c * dcy;
                     }
                     if (sys.fault_clear_t > 0 && ts >= sys.fault_clear_t - 1e-10) {
                         double Vm = sqrt(var*var + vai*vai);
@@ -437,10 +534,15 @@ int main(int argc, char **argv)
                         vb += 0.08*Vm*he*cos(3.0*(wr*ts-2.0943951024)) + 0.04*Vm*he*cos(5.0*(wr*ts-2.0943951024));
                         vc += 0.08*Vm*he*cos(3.0*(wr*ts+2.0943951024)) + 0.04*Vm*he*cos(5.0*(wr*ts+2.0943951024));
                     }
-                    fprintf(ofile, "%.6f,%.6f,%.6f,%.6f\n", ts, va, vb, vc);
+                    if (ofile) fprintf(ofile, "%.6f,%.6f,%.6f,%.6f\n", ts, va, vb, vc);
+                    if (ctw) {
+                        double av[6] = {va, vb, vc, ia, ib, ic};
+                        comtrade_write_ascii(ctw, ts, av, NULL);
+                    }
                 }
                 Va_pr = Var; Va_pi = Vai; Vb_pr = Vbr; Vb_pi = Vbi; Vc_pr = Vcr; Vc_pi = Vci;
-                Vr_prev = Vr_n; Vi_prev = Vi_n; t_prev = t;
+                Ia_pr = Iar; Ia_pi = Iai; Ib_pr = Ibr; Ib_pi = Ibi; Ic_pr = Icr; Ic_pi = Ici;
+                Vr_prev = Vr_n; Vi_prev = Vi_n; Ir_prev = Ir_n; Ii_prev = Ii_n; t_prev = t;
             }
         }
 
@@ -523,6 +625,19 @@ int main(int argc, char **argv)
     if (dfile) fclose(dfile);
     if (vfile) fclose(vfile);
     if (ofile) fclose(ofile);
+
+    if (ctw) {
+        double trig_t = sys.fault_t0 > 0 ? sys.fault_t0 : t * 0.5;
+        int tsec = (int)trig_t;
+        int tusec = (int)((trig_t - tsec) * 1e6);
+        int thh = tsec / 3600, tmm = (tsec / 60) % 60, tsss = tsec % 60;
+        comtrade_set_time(ctw, 2026,1,1,0,0,0,0, 2026,1,1,thh,tmm,tsss,tusec);
+        char cpath[1024];
+        snprintf(cpath, sizeof(cpath), "%s/comtrade_bus%d.cfg", output_dir, comtrade_bus);
+        comtrade_write_cfg(ctw, cpath);
+        comtrade_close(ctw);
+        log_info("COMTRADE: written to %s", cpath);
+    }
 
     /* plot generation */
     if (do_plot) {

@@ -7,6 +7,8 @@
 int raw_parse(const char *filename, System *sys, Arena *a);
 int dyr_parse(const char *filename, System *sys, Arena *a);
 int events_parse(const char *filename, Event **evlist, Arena *a);
+int raw_write(const char *filename, const System *sys);
+int dyr_write(const char *filename, const System *sys);
 
 /* --- network --- */
 int ybus_build(System *sys, Arena *a);
@@ -29,6 +31,9 @@ void integrator_free(Integrator *itg);
 /* --- events --- */
 int events_apply(System *sys, Event *ev, double t);
 int events_post_state(const System *sys, const double *delta, double *V_out);
+
+/* --- COMTRADE --- */
+#include "comtrade.h"
 
 /* --- output --- */
 CSVWriter *csv_open(const char *path, int ncols, const char **headers);

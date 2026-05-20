@@ -115,6 +115,7 @@ int events_apply(System *sys, Event *ev, double t)
         else if (ev->type == FAULT_DLG) { ftype = 3; ftname = "DLG"; }
 
         sys->fault_type = ftype;
+        sys->fault_phase = ev->fault_phase;
         sys->fault_Zth_r = Zth_r;
         sys->fault_Zth_i = Zth_i;
         sys->fault_Vth_r = Vth_r;
@@ -136,6 +137,7 @@ int events_apply(System *sys, Event *ev, double t)
         sys->fault_clear_t = t;
         sys->fault_bus = -1;
         sys->fault_type = 0;
+        sys->fault_phase = 0;
         break;
     case LINE_OPEN: {
         log_info("EVENT: line %d-%d opened", ev->from, ev->to);

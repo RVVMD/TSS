@@ -47,19 +47,42 @@ int events_parse(const char *filename, Event **evlist, Arena *a)
 
         if (!strcmp(key, "time"))     curev.time     = atof(val);
         else if (!strcmp(key, "type")) {
-            if (!strcmp(val, "fault"))      curev.type = FAULT;
-            else if (!strcmp(val, "slg"))    curev.type = FAULT_SLG;
-            else if (!strcmp(val, "ll"))     curev.type = FAULT_LL;
-            else if (!strcmp(val, "dlg"))    curev.type = FAULT_DLG;
+            if (!strcmp(val, "fault") || !strcmp(val, "3ph") || !strcmp(val, "ABC")) {
+                curev.type = FAULT; curev.fault_phase = FAULT_PHASE_ABC;
+            }
+            else if (!strcmp(val, "slg") || !strcmp(val, "AG")) {
+                curev.type = FAULT_SLG; curev.fault_phase = FAULT_PHASE_AG;
+            }
+            else if (!strcmp(val, "BG")) { curev.type = FAULT_SLG; curev.fault_phase = FAULT_PHASE_BG; }
+            else if (!strcmp(val, "CG")) { curev.type = FAULT_SLG; curev.fault_phase = FAULT_PHASE_CG; }
+            else if (!strcmp(val, "ll")  || !strcmp(val, "LL") || !strcmp(val, "BC")) {
+                curev.type = FAULT_LL; curev.fault_phase = FAULT_PHASE_BC;
+            }
+            else if (!strcmp(val, "AB")) { curev.type = FAULT_LL; curev.fault_phase = FAULT_PHASE_AB; }
+            else if (!strcmp(val, "CA")) { curev.type = FAULT_LL; curev.fault_phase = FAULT_PHASE_CA; }
+            else if (!strcmp(val, "dlg") || !strcmp(val, "DLG") || !strcmp(val, "BCG")) {
+                curev.type = FAULT_DLG; curev.fault_phase = FAULT_PHASE_BC;
+            }
+            else if (!strcmp(val, "ABG")) { curev.type = FAULT_DLG; curev.fault_phase = FAULT_PHASE_AB; }
+            else if (!strcmp(val, "CAG")) { curev.type = FAULT_DLG; curev.fault_phase = FAULT_PHASE_CA; }
             else if (!strcmp(val, "line-open"))  curev.type = LINE_OPEN;
             else if (!strcmp(val, "clear"))      curev.type = FAULT_CLEAR;
-            else if (!strcmp(val, "end"))       curev.type = END_SIM;
+            else if (!strcmp(val, "end"))         curev.type = END_SIM;
         }
         else if (!strcmp(key, "bus"))       curev.bus       = atoi(val);
         else if (!strcmp(key, "from"))      curev.from      = atoi(val);
         else if (!strcmp(key, "to"))        curev.to        = atoi(val);
         else if (!strcmp(key, "r"))         curev.fault_r   = atof(val);
         else if (!strcmp(key, "x"))         curev.fault_x   = atof(val);
+        else if (!strcmp(key, "phase")) {
+            if      (!strcmp(val, "AB")) curev.fault_phase = FAULT_PHASE_AB;
+            else if (!strcmp(val, "BC")) curev.fault_phase = FAULT_PHASE_BC;
+            else if (!strcmp(val, "CA")) curev.fault_phase = FAULT_PHASE_CA;
+            else if (!strcmp(val, "AG")) curev.fault_phase = FAULT_PHASE_AG;
+            else if (!strcmp(val, "BG")) curev.fault_phase = FAULT_PHASE_BG;
+            else if (!strcmp(val, "CG")) curev.fault_phase = FAULT_PHASE_CG;
+            else if (!strcmp(val, "ABC")) curev.fault_phase = FAULT_PHASE_ABC;
+        }
     }
 
     if (in_event) arrpush(*evlist, curev);

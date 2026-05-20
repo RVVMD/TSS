@@ -44,11 +44,20 @@ typedef enum {
     GEN_TRIP     = 4,
     LOAD_SHED    = 5,
     FAULT_CLEAR  = 6,
-    FAULT_SLG    = 7,   /* single-line-to-ground */
-    FAULT_LL     = 8,   /* line-to-line */
-    FAULT_DLG    = 9,   /* double-line-to-ground */
+    FAULT_SLG    = 7,
+    FAULT_LL     = 8,
+    FAULT_DLG    = 9,
     END_SIM      = 99
 } EventType;
+
+/* fault phase codes: which phases are involved */
+#define FAULT_PHASE_ABC  0
+#define FAULT_PHASE_AB   1
+#define FAULT_PHASE_BC   2
+#define FAULT_PHASE_CA   3
+#define FAULT_PHASE_AG   4
+#define FAULT_PHASE_BG   5
+#define FAULT_PHASE_CG   6
 
 /* --- arena allocator --- */
 typedef struct {
@@ -160,6 +169,7 @@ typedef struct {
     int       bus;
     int       from, to;
     double    fault_r, fault_x;
+    int       fault_phase;
 } Event;
 
 /* --- system --- */
@@ -178,8 +188,9 @@ typedef struct {
     double  *machine_states;
     /* fault state */
     int     fault_bus;       /* -1 = no fault */
-    double  fault_Y_r, fault_Y_i; /* shunt admittance at fault bus */
+    double  fault_Y_r, fault_Y_i;
     int     fault_type;      /* 0=balanced, 1=SLG, 2=LL, 3=DLG */
+    int     fault_phase;     /* FAULT_PHASE_* */
     double  fault_Zth_r, fault_Zth_i; /* Thevenin impedance at fault bus */
     double  fault_Vth_r, fault_Vth_i; /* Thevenin voltage at fault bus */
     double  fault_t0;        /* fault inception time */

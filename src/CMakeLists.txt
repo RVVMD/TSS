@@ -19,6 +19,7 @@ set(LIBSOURCES
     dae.c
     integrator.c
     events.c
+    comtrade.c
     output.c
 )
 

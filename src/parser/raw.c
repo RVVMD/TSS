@@ -227,3 +227,59 @@ int raw_parse(const char *filename, System *sys, Arena *a)
              sys->nbus, sys->nbranch, sys->ngen, sys->nload, sys->base_mva);
     return 0;
 }
+
+int raw_write(const char *filename, const System *sys)
+{
+    FILE *fp = fopen(filename, "w");
+    if (!fp) { log_error("cannot open %s for writing", filename); return -1; }
+    fprintf(fp, "0, %.2f\n", sys->base_mva);
+    fprintf(fp, "TSS exported RAW file\n");
+    fprintf(fp, "\n");
+    for (int i = 0; i < sys->nbus; i++) {
+        Bus *b = &sys->bus[i];
+        int typ = 1;
+        switch (b->type) {
+            case BUS_PQ:      typ = 1; break;
+            case BUS_PV:      typ = 2; break;
+            case BUS_SLACK:   typ = 3; break;
+            default:          typ = 4; break;
+        }
+        fprintf(fp, "%d, '%s', %.4f, %d, 1, 1, 1, %.6f, %.4f, %.6f, %.6f, %.6f, %.4f\n",
+            b->id, b->name, b->base_kv, typ,
+            b->vm, b->va * 180.0 / M_PI,
+            b->pd * sys->base_mva, b->qd * sys->base_mva,
+            b->vmax, b->vmin);
+    }
+    fprintf(fp, "0\n");
+    for (int i = 0; i < sys->nload; i++) {
+        Load *ld = &sys->load[i];
+        int bus_id = sys->bus[ld->bus].id;
+        fprintf(fp, "%d, %d, 1, 1, 1, %.6f, %.6f\n",
+            bus_id, ld->id, ld->p * sys->base_mva, ld->q * sys->base_mva);
+    }
+    fprintf(fp, "0\n");
+    for (int i = 0; i < sys->ngen; i++) {
+        Gen *g = &sys->gen[i];
+        int bus_id = sys->bus[g->bus].id;
+        double mbase = g->mbase > 0.0 ? g->mbase : 100.0;
+        double vsched = g->vsched > 0.0 ? g->vsched : sys->bus[g->bus].vm;
+        fprintf(fp, "%d, %d, %.6f, %.6f, 0.0, 0.0, %.4f, 1, %.2f, %.4f\n",
+            bus_id, g->id, g->pg * sys->base_mva, g->qg * sys->base_mva,
+            vsched, mbase, vsched);
+    }
+    fprintf(fp, "0\n");
+    for (int i = 0; i < sys->nbranch; i++) {
+        Branch *br = &sys->branch[i];
+        int from_id = sys->bus[br->from].id;
+        int to_id = sys->bus[br->to].id;
+        fprintf(fp, "%d, %d, '%s', %.6f, %.6f, %.6f, %.2f, %.2f, %.2f, 0.0, 0.0, %.6f, %.2f\n",
+            from_id, to_id, br->ckt, br->r, br->x, br->b,
+            br->rate_a, br->rate_b, br->rate_c,
+            br->tap > 0.0 ? br->tap : 1.0, br->shift);
+    }
+    fprintf(fp, "0\n0\n");
+    fclose(fp);
+    log_info("RAW: saved to %s (%d buses, %d branches, %d gens, %d loads)",
+             filename, sys->nbus, sys->nbranch, sys->ngen, sys->nload);
+    return 0;
+}

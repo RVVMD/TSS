@@ -9,6 +9,14 @@
 #include <sunlinsol/sunlinsol_dense.h>
 #include <sunmatrix/sunmatrix_dense.h>
 
+static void silent_err_handler(int line, const char *func, const char *file,
+                               const char *msg, SUNErrCode err_code,
+                               void *data, SUNContext sunctx)
+{
+    (void)line; (void)func; (void)file; (void)msg;
+    (void)err_code; (void)data; (void)sunctx;
+}
+
 int integrator_init(Integrator *itg, DAE *dae, double t0)
 {
     int neq = dae->neq;
@@ -50,6 +58,7 @@ int integrator_init(Integrator *itg, DAE *dae, double t0)
     itg->ida_mem = IDACreate(itg->sunctx);
     if (!itg->ida_mem) { log_error("IDACreate failed"); return -1; }
 
+    SUNContext_PushErrHandler(itg->sunctx, silent_err_handler, NULL);
     IDASetMaxOrd(itg->ida_mem, 1);
 
     ret = IDAInit(itg->ida_mem, dae_residual, t0,

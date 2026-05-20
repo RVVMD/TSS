@@ -125,3 +125,20 @@ int dyr_parse(const char *filename, System *sys, Arena *a)
     log_info("DYR: %d machines", sys->nmachines);
     return 0;
 }
+
+int dyr_write(const char *filename, const System *sys)
+{
+    FILE *fp = fopen(filename, "w");
+    if (!fp) { log_error("cannot open %s for writing", filename); return -1; }
+    for (int i = 0; i < sys->nmachines; i++) {
+        Machine *m = &sys->machine[i];
+        int gen_idx = m->gen_idx;
+        int bus_id = sys->bus[sys->gen[gen_idx].bus].id;
+        int gen_id = sys->gen[gen_idx].id;
+        fprintf(fp, "%d, %d, GENCLS, %.4f, %.4f, %.4f\n",
+            bus_id, gen_id, m->h, m->d, m->xdp);
+    }
+    fclose(fp);
+    log_info("DYR: saved to %s (%d machines)", filename, sys->nmachines);
+    return 0;
+}
