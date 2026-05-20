@@ -396,7 +396,10 @@ int main(int argc, char **argv)
                     double Pe = Vr*(Ep*sin(d)-Vi)/xdp + Vi*(-(Ep*cos(d)-Vr))/xdp;
                     double TwoH = 2.0 * mc->h;
                     double om = ydata[2*m+1];
-                    if (om < 0.1 || om > 2.0) om = 1.0;
+                    if (om < 0.1 || om > 2.0) {
+                        log_warn("omega clamped from %.4f to 1.0 at gen %d", om, m);
+                        om = 1.0;
+                    }
                     ypd[2*m]   = ws * (om - 1.0);
                     ypd[2*m+1] = ws / TwoH * (gen->pg - Pe - mc->d*(om-1.0));
                 }
@@ -527,13 +530,6 @@ int main(int argc, char **argv)
                         double dcy = exp(-(ts - sys.fault_t0) / tau);
                         va -= Vdc_a * dcy; vb -= Vdc_b * dcy; vc -= Vdc_c * dcy;
                         ia -= Idc_a * dcy; ib -= Idc_b * dcy; ic -= Idc_c * dcy;
-                    }
-                    if (sys.fault_clear_t > 0 && ts >= sys.fault_clear_t - 1e-10) {
-                        double Vm = sqrt(var*var + vai*vai);
-                        double he = exp(-(ts - sys.fault_clear_t) / 0.3);
-                        va += 0.08*Vm*he*cos(3.0*wr*ts) + 0.04*Vm*he*cos(5.0*wr*ts);
-                        vb += 0.08*Vm*he*cos(3.0*(wr*ts-2.0943951024)) + 0.04*Vm*he*cos(5.0*(wr*ts-2.0943951024));
-                        vc += 0.08*Vm*he*cos(3.0*(wr*ts+2.0943951024)) + 0.04*Vm*he*cos(5.0*(wr*ts+2.0943951024));
                     }
                     if (ofile) fprintf(ofile, "%.6f,%.6f,%.6f,%.6f\n", ts, va, vb, vc);
                     if (ctw) {

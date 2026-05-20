@@ -29,6 +29,8 @@ static int lb2_getline(LineBuf2 *lb, FILE *fp)
         lb->data[lb->len++] = (char)c;
     }
     lb->data[lb->len] = '\0';
+    while (lb->len > 0 && (lb->data[lb->len-1] == '\r' || lb->data[lb->len-1] == '\n'))
+        lb->data[--lb->len] = '\0';
     return (lb->len > 0 || c == '\n') ? 0 : -1;
 }
 

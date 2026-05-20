@@ -77,9 +77,10 @@ void  arena_free(Arena *a);
 
 void *_arrgrow(void *arr, size_t elem_sz);
 #define arrpush(a, v) do { \
-    if (!(a) || arrlen(a) >= arrcap(a)) \
+    if (!(a) || arrlen(a) >= arrcap(a)) { \
         (a) = _arrgrow((a), sizeof(*(a))); \
-    else { \
+        if (!(a)) break; \
+    } else { \
         size_t *_h = ((size_t *)(a)) - 2; \
         _h[0] += 1; \
     } \

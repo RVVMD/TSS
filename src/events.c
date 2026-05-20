@@ -36,9 +36,9 @@ static void thevenin(const System *sys, int bi,
         *Zth_i = -Gi / denom;
     }
 
-    /* Thevenin voltage: estimated as 1.0 + j0 (nominal) */
-    *Vth_r = 1.0;
-    *Vth_i = 0.0;
+    /* Thevenin voltage: use the actual pre-fault bus voltage */
+    *Vth_r = sys->bus[bi].vm * cos(sys->bus[bi].va);
+    *Vth_i = sys->bus[bi].vm * sin(sys->bus[bi].va);
 }
 
 /* compute effective positive-sequence fault shunt admittance */

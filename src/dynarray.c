@@ -15,10 +15,10 @@ void *_arrgrow(void *arr, size_t elem_sz)
     }
 
     newcap = cap ? cap * 2 : 8;
-    if (newcap > SIZE_MAX / elem_sz) return NULL;
+    size_t header_sz = 2 * sizeof(size_t);
+    if (newcap > (SIZE_MAX - header_sz) / elem_sz) return NULL;
 
-    size_t alloc_sz = 2 * sizeof(size_t) + newcap * elem_sz;
-    if (alloc_sz < 2 * sizeof(size_t)) return NULL; /* overflow */
+    size_t alloc_sz = header_sz + newcap * elem_sz;
 
     if (!arr) {
         header = malloc(alloc_sz);
