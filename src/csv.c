@@ -8,6 +8,7 @@ CSVWriter *csv_open(const char *path, int ncols, const char **headers)
     if (!fp) return NULL;
 
     CSVWriter *w = malloc(sizeof(CSVWriter));
+    if (!w) { fclose(fp); return NULL; }
     w->fp = fp;
     w->ncols = ncols;
     w->headers = NULL;

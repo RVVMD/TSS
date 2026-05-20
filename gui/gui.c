@@ -268,8 +268,8 @@ static void plot_clear(App *app) {
 
 static void plot_file_close(App *app) {
     if (app->plot_fp) { fclose(app->plot_fp); app->plot_fp = NULL; }
-    remove(PLOT_FILE);
     loader_cancel(app);
+    remove(PLOT_FILE);
     free(app->ov_t); free(app->ov_data);
     free(app->fr_t); free(app->fr_data);
     app->ov_t = NULL; app->ov_data = NULL;
@@ -300,9 +300,8 @@ static void plot_build_overview(App *app) {
         fseek(fp, (long)(start * rec_size) * sizeof(double), SEEK_SET);
         fread(buf, sizeof(double), rec_size, fp);
         double t_first = buf[0];
-        double t_last = t_first;
-        double *minv = malloc(nsig * sizeof(double));
-        double *maxv = malloc(nsig * sizeof(double));
+        double *minv = malloc((size_t)nsig * sizeof(double));
+        double *maxv = malloc((size_t)nsig * sizeof(double));
         for (int s = 0; s < nsig; s++) {
             minv[s] = buf[1 + s];
             maxv[s] = buf[1 + s];
@@ -314,13 +313,20 @@ static void plot_build_overview(App *app) {
         for (int i = start + ss; i < end; i += ss) {
             fseek(fp, (long)(i * rec_size) * sizeof(double), SEEK_SET);
             fread(buf, sizeof(double), rec_size, fp);
-            t_last = buf[0];
             for (int s = 0; s < nsig; s++) {
                 double v = buf[1 + s];
                 if (v < minv[s]) minv[s] = v;
                 if (v > maxv[s]) maxv[s] = v;
+            }
         }
-    }
+
+        app->ov_t[out] = t_first;
+        for (int s = 0; s < nsig; s++)
+            app->ov_data[out * nsig + s] = (minv[s] + maxv[s]) * 0.5;
+        out++;
+
+        free(minv);
+        free(maxv);
     }
 
     app->ov_len = out;
@@ -1029,6 +1035,7 @@ static void on_save_results(GtkMenuItem *item, App *app) {
             }
         }
 
+        rewind(fp);
         for (int r = 0; r < nrec; r++) {
             if (fread(buf, sizeof(double), (size_t)(1 + nsig), fp) != (size_t)(1 + nsig)) break;
             double t = buf[0];
@@ -2039,6 +2046,11 @@ static void delete_selected_from_tree(GtkWidget *tree, void *arr, int *n, size_t
     } else if (*n > 0) {
         (*n)--;
     }
+    /* sync stretchy buffer header */
+    if (arr) {
+        size_t *h = ((size_t *)arr) - 2;
+        h[0] = (size_t)*n;
+    }
 }
 static void delete_selected_bus(App *app) {
     delete_selected_from_tree(app->bus_tree, app->sys.bus, &app->sys.nbus, sizeof(Bus));
@@ -2475,9 +2487,15 @@ static gpointer sim_thread_fn(gpointer data) {
         }
 
         double *y = N_VGetArrayPointer(itg.nvec_y);
-        double gen_delta[16], gen_pe[16], gen_omega[16], gen_vt[16];
-        double bus_vm[32], bus_va[32];
-        for (int m = 0; m < n_gen && m < 16; m++) {
+        int max_gen = n_gen > 0 ? n_gen : 1;
+        int max_bus = n_bus > 0 ? n_bus : 1;
+        double *gen_delta = malloc((size_t)max_gen * sizeof(double));
+        double *gen_pe    = malloc((size_t)max_gen * sizeof(double));
+        double *gen_omega = malloc((size_t)max_gen * sizeof(double));
+        double *gen_vt    = malloc((size_t)max_gen * sizeof(double));
+        double *bus_vm    = malloc((size_t)max_bus * sizeof(double));
+        double *bus_va    = malloc((size_t)max_bus * sizeof(double));
+        for (int m = 0; m < n_gen; m++) {
             int bi = s.gen[s.machine[m].gen_idx].bus;
             double d = y[2*m], om = y[2*m+1];
             double Vr = y[ndiff + 2*bi], Vi = y[ndiff + 2*bi + 1];
@@ -2486,7 +2504,7 @@ static gpointer sim_thread_fn(gpointer data) {
             double Vt = sqrt(Vr*Vr + Vi*Vi);
             gen_delta[m] = d; gen_pe[m] = Pe; gen_omega[m] = om; gen_vt[m] = Vt;
         }
-        for (int i = 0; i < n_bus && i < 32; i++) {
+        for (int i = 0; i < n_bus; i++) {
             double Vr = y[ndiff + 2*i], Vi = y[ndiff + 2*i + 1];
             bus_vm[i] = sqrt(Vr*Vr + Vi*Vi);
             bus_va[i] = atan2(Vi, Vr) * 180.0 / M_PI;
@@ -2528,6 +2546,8 @@ static gpointer sim_thread_fn(gpointer data) {
             }
         }
         plot_push(app, t, gen_delta, gen_pe, gen_omega, gen_vt, bus_vm, bus_va, osc_va, osc_vb, osc_vc);
+        free(gen_delta); free(gen_pe); free(gen_omega); free(gen_vt);
+        free(bus_vm); free(bus_va);
         if (step % 1000 == 0 && app->plot_fp) fflush(app->plot_fp);
 
         g_mutex_lock(&app->sim_lock);
@@ -2574,16 +2594,14 @@ static void sim_run(App *app) {
         return;
     }
 
-    /* Save current system to temp files if no files loaded or data was modified */
+    /* Save current system to temp files (captures GUI edits) */
     char tmp_raw[512] = "", tmp_dyr[512] = "";
-    if (!app->raw_path[0] || !app->dyr_path[0]) {
-        snprintf(tmp_raw, sizeof(tmp_raw), "/tmp/tss_sim_%d.raw", getpid());
-        snprintf(tmp_dyr, sizeof(tmp_dyr), "/tmp/tss_sim_%d.dyr", getpid());
-        raw_write(tmp_raw, &app->sys);
-        dyr_write(tmp_dyr, &app->sys);
-        if (!app->raw_path[0]) strncpy(app->raw_path, tmp_raw, sizeof(app->raw_path) - 1);
-        if (!app->dyr_path[0]) strncpy(app->dyr_path, tmp_dyr, sizeof(app->dyr_path) - 1);
-    }
+    snprintf(tmp_raw, sizeof(tmp_raw), "/tmp/tss_sim_%d.raw", getpid());
+    snprintf(tmp_dyr, sizeof(tmp_dyr), "/tmp/tss_sim_%d.dyr", getpid());
+    raw_write(tmp_raw, &app->sys);
+    dyr_write(tmp_dyr, &app->sys);
+    strncpy(app->raw_path, tmp_raw, sizeof(app->raw_path) - 1);
+    strncpy(app->dyr_path, tmp_dyr, sizeof(app->dyr_path) - 1);
 
     app->t_end = gtk_spin_button_get_value(GTK_SPIN_BUTTON(app->spin_tend));
     app->t_step = gtk_spin_button_get_value(GTK_SPIN_BUTTON(app->spin_tstep));

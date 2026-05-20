@@ -20,7 +20,8 @@ static void thevenin(const System *sys, int bi,
     /* add generator shunt: 1/(j*x'd) = -j/x'd */
     for (int m = 0; m < sys->nmachines; m++) {
         if (sys->gen[sys->machine[m].gen_idx].bus == bi) {
-            Gi += -1.0 / sys->machine[m].xdp;
+            double xdp = fabs(sys->machine[m].xdp) > 1e-10 ? sys->machine[m].xdp : 1.0;
+            Gi += -1.0 / xdp;
         }
     }
     /* add load shunt */
@@ -174,6 +175,7 @@ int events_post_state(const System *sys, const double *delta, double *V_out)
 
     double *G = calloc((size_t)n * n, sizeof(double));
     double *B = calloc((size_t)n * n, sizeof(double));
+    if (!G || !B) { free(G); free(B); return -1; }
 
     for (int i = 0; i < n; i++) {
         for (int k = sys->colptr[i]; k < sys->colptr[i+1]; k++) {
@@ -184,8 +186,12 @@ int events_post_state(const System *sys, const double *delta, double *V_out)
     }
 
     for (int m = 0; m < sys->nmachines; m++) {
-        int bi = sys->gen[sys->machine[m].gen_idx].bus;
-        B[bi * n + bi] += -1.0 / sys->machine[m].xdp;
+        int gi = sys->machine[m].gen_idx;
+        if (gi < 0 || gi >= sys->ngen) continue;
+        int bi = sys->gen[gi].bus;
+        if (bi < 0 || bi >= n) continue;
+        double xdp = fabs(sys->machine[m].xdp) > 1e-10 ? sys->machine[m].xdp : 1.0;
+        B[bi * n + bi] += -1.0 / xdp;
     }
 
     for (int i = 0; i < n; i++) {
@@ -195,6 +201,7 @@ int events_post_state(const System *sys, const double *delta, double *V_out)
     }
 
     double *A = calloc((size_t)N2 * N2, sizeof(double));
+    if (!A) { free(G); free(B); return -1; }
 
     for (int i = 0; i < n; i++) {
         for (int j = 0; j < n; j++) {
@@ -209,14 +216,18 @@ int events_post_state(const System *sys, const double *delta, double *V_out)
     free(G); free(B);
 
     double *rhs = calloc(N2, sizeof(double));
+    if (!rhs) { free(A); return -1; }
 
     for (int m = 0; m < sys->nmachines; m++) {
-        int bi = sys->gen[sys->machine[m].gen_idx].bus;
+        int gi = sys->machine[m].gen_idx;
+        if (gi < 0 || gi >= sys->ngen) continue;
+        int bi = sys->gen[gi].bus;
+        if (bi < 0 || bi >= n) continue;
         double d = delta[2 * m];
         double Ep = sys->machine[m].Ep;
-        double xdp = sys->machine[m].xdp;
-        rhs[2*bi]     +=  Ep * sin(d) / xdp;
-        rhs[2*bi + 1] += -Ep * cos(d) / xdp;
+        double xdp_inv = fabs(sys->machine[m].xdp) > 1e-10 ? 1.0 / sys->machine[m].xdp : 0.0;
+        rhs[2*bi]     +=  Ep * sin(d) * xdp_inv;
+        rhs[2*bi + 1] += -Ep * cos(d) * xdp_inv;
     }
 
     if (slack >= 0) {
@@ -227,6 +238,7 @@ int events_post_state(const System *sys, const double *delta, double *V_out)
     }
 
     int *ipiv = malloc((size_t)N2 * sizeof(int));
+    if (!ipiv) { free(rhs); free(A); return -1; }
     int info = LAPACKE_dgesv(LAPACK_ROW_MAJOR, N2, 1, A, N2, ipiv, rhs, 1);
 
     memcpy(V_out, rhs, (size_t)N2 * sizeof(double));

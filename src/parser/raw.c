@@ -125,6 +125,7 @@ int raw_parse(const char *filename, System *sys, Arena *a)
         char *name = tok[1];
         if (name[0] == '\'') { name++; name[strlen(name)-1] = '\0'; }
         strncpy(b.name, name, sizeof(b.name) - 1);
+        b.name[sizeof(b.name) - 1] = '\0';
 
         if (nt >= 3) b.base_kv = parse_dbl(tok[2]);
         if (nt >= 4) {
@@ -202,7 +203,10 @@ int raw_parse(const char *filename, System *sys, Arena *a)
         br.tap = 1.0;   /* default: no transformer */
         br.from  = bus_from - 1;
         br.to    = parse_int(tok[1]) - 1;
-        if (nt >= 3) strncpy(br.ckt, tok[2], sizeof(br.ckt) - 1);
+        if (nt >= 3) {
+            strncpy(br.ckt, tok[2], sizeof(br.ckt));
+            br.ckt[sizeof(br.ckt) - 1] = '\0';
+        }
         if (nt >= 4) br.r = parse_dbl(tok[3]);
         if (nt >= 5) br.x = parse_dbl(tok[4]);
         if (nt >= 6) br.b = parse_dbl(tok[5]);

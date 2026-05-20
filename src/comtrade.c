@@ -1,8 +1,12 @@
-#include "comtrade.h"
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 199506L
+#endif
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
 #include <time.h>
+#include <limits.h>
+#include "comtrade.h"
 
 ComtradeWriter *comtrade_create(const char *station, const char *device)
 {
@@ -20,7 +24,8 @@ ComtradeWriter *comtrade_create(const char *station, const char *device)
     w->sample_num = 0;
 
     time_t now = time(NULL);
-    struct tm *g = gmtime(&now);
+    struct tm gbuf;
+    struct tm *g = gmtime_r(&now, &gbuf);
     w->sy = g->tm_year + 1900;
     w->sm = g->tm_mon + 1;
     w->sd = g->tm_mday;
@@ -50,11 +55,12 @@ int comtrade_add_analog(ComtradeWriter *w, const char *id, const char *phase,
                         double primary, double secondary, int ps)
 {
     if (w->n_analogs >= w->cap_analogs) {
-        int newcap = w->cap_analogs ? w->cap_analogs * 2 : 16;
-        ComtradeAnalogCh *tmp = realloc(w->analogs, (size_t)newcap * sizeof(ComtradeAnalogCh));
+        size_t newcap = w->cap_analogs ? (size_t)w->cap_analogs * 2 : 16;
+        if (newcap > INT_MAX) return -1;
+        ComtradeAnalogCh *tmp = realloc(w->analogs, newcap * sizeof(ComtradeAnalogCh));
         if (!tmp) return -1;
         w->analogs = tmp;
-        w->cap_analogs = newcap;
+        w->cap_analogs = (int)newcap;
     }
     ComtradeAnalogCh *ch = &w->analogs[w->n_analogs++];
     ch->index = w->n_analogs;
@@ -76,11 +82,12 @@ int comtrade_add_digital(ComtradeWriter *w, const char *id, const char *phase,
                          const char *circuit)
 {
     if (w->n_digitals >= w->cap_digitals) {
-        int newcap = w->cap_digitals ? w->cap_digitals * 2 : 16;
-        ComtradeDigitalCh *tmp = realloc(w->digitals, (size_t)newcap * sizeof(ComtradeDigitalCh));
+        size_t newcap = w->cap_digitals ? (size_t)w->cap_digitals * 2 : 16;
+        if (newcap > INT_MAX) return -1;
+        ComtradeDigitalCh *tmp = realloc(w->digitals, newcap * sizeof(ComtradeDigitalCh));
         if (!tmp) return -1;
         w->digitals = tmp;
-        w->cap_digitals = newcap;
+        w->cap_digitals = (int)newcap;
     }
     ComtradeDigitalCh *ch = &w->digitals[w->n_digitals++];
     ch->index = w->n_digitals;
@@ -183,6 +190,6 @@ double comtrade_v_factor(double base_kv)
 
 double comtrade_i_factor(double base_mva, double base_kv)
 {
-    if (base_kv < 1e-10) return 0;
+    if (base_kv < 1e-10) return 1.0;
     return base_mva * sqrt(2.0) / (sqrt(3.0) * base_kv);
 }

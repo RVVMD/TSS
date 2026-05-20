@@ -9,12 +9,12 @@
 #include <sunlinsol/sunlinsol_dense.h>
 #include <sunmatrix/sunmatrix_dense.h>
 
-static void silent_err_handler(int line, const char *func, const char *file,
-                               const char *msg, SUNErrCode err_code,
-                               void *data, SUNContext sunctx)
+static void log_err_handler(int line, const char *func, const char *file,
+                            const char *msg, SUNErrCode err_code,
+                            void *data, SUNContext sunctx)
 {
-    (void)line; (void)func; (void)file; (void)msg;
-    (void)err_code; (void)data; (void)sunctx;
+    (void)data; (void)sunctx;
+    log_warn("SUNDIALS [%s:%d %s] err=%d: %s", file, line, func, err_code, msg);
 }
 
 int integrator_init(Integrator *itg, DAE *dae, double t0)
@@ -31,7 +31,10 @@ int integrator_init(Integrator *itg, DAE *dae, double t0)
     itg->nvec_y = N_VNew_Serial(neq, itg->sunctx);
     itg->nvec_ydot = N_VNew_Serial(neq, itg->sunctx);
     if (!itg->nvec_y || !itg->nvec_ydot) {
-        log_error("N_VNew_Serial failed"); return -1;
+        log_error("N_VNew_Serial failed");
+        if (itg->nvec_y) N_VDestroy(itg->nvec_y);
+        if (itg->nvec_ydot) N_VDestroy(itg->nvec_ydot);
+        return -1;
     }
 
     double *ydata = N_VGetArrayPointer(itg->nvec_y);
@@ -58,7 +61,7 @@ int integrator_init(Integrator *itg, DAE *dae, double t0)
     itg->ida_mem = IDACreate(itg->sunctx);
     if (!itg->ida_mem) { log_error("IDACreate failed"); return -1; }
 
-    SUNContext_PushErrHandler(itg->sunctx, silent_err_handler, NULL);
+    SUNContext_PushErrHandler(itg->sunctx, log_err_handler, NULL);
     IDASetMaxOrd(itg->ida_mem, 1);
 
     ret = IDAInit(itg->ida_mem, dae_residual, t0,
@@ -70,6 +73,7 @@ int integrator_init(Integrator *itg, DAE *dae, double t0)
     IDASetMaxNumSteps(itg->ida_mem, 500000);
 
     N_Vector id = N_VNew_Serial(neq, itg->sunctx);
+    if (!id) { log_error("N_VNew_Serial(id) failed"); return -1; }
     double *idd = N_VGetArrayPointer(id);
     for (int i = 0; i < ndiff; i++) idd[i] = 1.0;
     for (int i = ndiff; i < neq; i++) idd[i] = 0.0;

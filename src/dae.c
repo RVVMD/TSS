@@ -46,7 +46,7 @@ int dae_residual(double t, N_Vector yy, N_Vector yp,
     double *r = N_VGetArrayPointer(rr);
     double ws = 2.0 * M_PI * 60.0;
 
-    (void)t; (void)ydot;
+    (void)t;
 
     for (int m = 0; m < sys->nmachines; m++) {
         int ridx = YDIFF(m);
@@ -56,8 +56,9 @@ int dae_residual(double t, N_Vector yy, N_Vector yp,
         int bus_i = gen->bus;
         double Vr = y[YVR(bus_i)], Vi = y[YVI(bus_i)];
         double Ep = mc->Ep, Er = Ep*cos(delta), Ei = Ep*sin(delta);
+        double xdp_inv = fabs(mc->xdp) > 1e-10 ? 1.0 / mc->xdp : 0.0;
         double dVr = Er-Vr, dVi = Ei-Vi;
-        double Pe = Vr*(dVi/mc->xdp) + Vi*(-dVr/mc->xdp);
+        double Pe = Vr*(dVi*xdp_inv) + Vi*(-dVr*xdp_inv);
         double TwoH = 2.0*mc->h;
         r[ridx]       = ydot[ridx] - ws*(omega-1.0);
         r[YOMEGA(m)] = TwoH/ws*ydot[YOMEGA(m)] - (gen->pg - Pe - mc->d*(omega-1.0));

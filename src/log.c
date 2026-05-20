@@ -1,12 +1,17 @@
-#include "types.h"
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 199506L
+#endif
 #include <stdio.h>
 #include <stdarg.h>
 #include <time.h>
+#include "types.h"
 
 static void log_msg(const char *level, const char *fmt, va_list ap)
 {
     time_t now = time(NULL);
-    struct tm *t = localtime(&now);
+    struct tm tmbuf;
+    struct tm *t = localtime_r(&now, &tmbuf);
+    if (!t) t = &tmbuf;
     fprintf(stderr, "[%02d:%02d:%02d] %-5s ",
             t->tm_hour, t->tm_min, t->tm_sec, level);
     vfprintf(stderr, fmt, ap);

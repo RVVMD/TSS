@@ -102,13 +102,18 @@ int ybus_build(System *sys, Arena *a)
     int *colptr = calloc(n + 1, sizeof(int));
     int *rowidx = calloc(nunique, sizeof(int));
     double *yval = calloc(2 * nunique, sizeof(double));
-
-    memset(colptr, 0, (n + 1) * sizeof(int));
+    if (!colptr || !rowidx || !yval) {
+        free(colptr); free(rowidx); free(yval);
+        arrfree(trips); return -1;
+    }
     for (int i = 0; i < nunique; i++) colptr[trips[i].c + 1]++;
     for (int i = 1; i <= n; i++) colptr[i] += colptr[i - 1];
 
     int *colfill = calloc(n, sizeof(int));
-    memset(colfill, 0, n * sizeof(int));
+    if (!colfill) {
+        free(colptr); free(rowidx); free(yval);
+        arrfree(trips); return -1;
+    }
     for (int i = 0; i < nunique; i++) {
         int c = trips[i].c, off = colptr[c] + colfill[c];
         rowidx[off] = trips[i].r;

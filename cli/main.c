@@ -203,10 +203,7 @@ int main(int argc, char **argv)
 
     mkdir(output_dir, 0755);
 
-    /* CSV headers via CSVWriter API */
-    const char *dheaders[11] = {"d0","w0","Pe0","Pm0","Vt0","d1","w1","Pe1","Pm1","Vt1",NULL};
     int ncols_d = 2 * sys.nmachines + 1; /* 2 per machine (d, w) */
-    /* We'll use manual fprintf for flexibility */
 
     FILE *dfile = open_out(output_dir, "delta.csv");
     FILE *vfile = open_out(output_dir, "voltage.csv");

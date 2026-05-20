@@ -1,6 +1,7 @@
 #include "types.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 
 Arena arena_new(size_t cap)
 {
@@ -13,8 +14,9 @@ Arena arena_new(size_t cap)
 
 void *arena_alloc(Arena *a, size_t n)
 {
+    if (n > SIZE_MAX - 7) return NULL;
     n = (n + 7) & ~7UL;
-    if (a->off + n > a->cap) return NULL;
+    if (a->off + n > a->cap || a->off + n < a->off) return NULL;
     void *p = a->mem + a->off;
     a->off += n;
     return p;

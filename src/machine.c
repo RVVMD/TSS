@@ -20,8 +20,10 @@ int machine_init(System *sys)
         double P = gen->pg;
         double Q = gen->qg;
 
-        double Ir = (P * Vr + Q * Vi) / (V * V);
-        double Ii = (P * Vi - Q * Vr) / (V * V);
+        double Vsq = V * V;
+        if (Vsq < 1e-20) Vsq = 1e-20;
+        double Ir = (P * Vr + Q * Vi) / Vsq;
+        double Ii = (P * Vi - Q * Vr) / Vsq;
 
         double Er = Vr - mc->xdp * Ii;
         double Ei = Vi + mc->xdp * Ir;

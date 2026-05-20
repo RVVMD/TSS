@@ -93,9 +93,8 @@ void *_arrgrow(void *arr, size_t elem_sz);
 typedef struct {
     int   key;
     void *val;
-    int   hash;
-    struct { int key; void *val; } entry;
-    int   occupied;
+    int   occupied;  /* 0=empty, 1=in-use or tombstone */
+    int   tombstone; /* 1=was removed, skip during lookup */
 } HMEntry;
 
 typedef struct {
