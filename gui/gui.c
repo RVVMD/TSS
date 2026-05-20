@@ -21,12 +21,11 @@ typedef enum {
 } SignalType;
 
 typedef struct {
-    char       label[64];
     SignalType type;
     int        idx;
     int        id;
     int        visible;
-    double    *data;
+    char       label[64];
 } Signal;
 
 typedef struct {
@@ -297,7 +296,7 @@ static void plot_build_overview(App *app) {
         if (b == n_buckets - 1) end = total;
         if (start >= total) break;
 
-        fseek(fp, (long)(start * rec_size) * sizeof(double), SEEK_SET);
+        fseeko(fp, (off_t)start * rec_size * sizeof(double), SEEK_SET);
         fread(buf, sizeof(double), rec_size, fp);
         double t_first = buf[0];
         double *minv = malloc((size_t)nsig * sizeof(double));
@@ -311,7 +310,7 @@ static void plot_build_overview(App *app) {
         int ss = n_in_bucket / 10;
         if (ss < 1) ss = 1;
         for (int i = start + ss; i < end; i += ss) {
-            fseek(fp, (long)(i * rec_size) * sizeof(double), SEEK_SET);
+            fseeko(fp, (off_t)i * rec_size * sizeof(double), SEEK_SET);
             fread(buf, sizeof(double), rec_size, fp);
             for (int s = 0; s < nsig; s++) {
                 double v = buf[1 + s];
@@ -365,7 +364,7 @@ static gpointer loader_thread_fn(gpointer data) {
     while (lo < hi) {
         int mid = (lo + hi) / 2;
         double t;
-        fseek(fp, (long)(mid * rec_size) * sizeof(double), SEEK_SET);
+        fseeko(fp, (off_t)mid * rec_size * sizeof(double), SEEK_SET);
         fread(&t, sizeof(double), 1, fp);
         if (t < t0) lo = mid + 1; else hi = mid;
     }
@@ -376,7 +375,7 @@ static gpointer loader_thread_fn(gpointer data) {
     while (lo < hi) {
         int mid = (lo + hi + 1) / 2;
         double t;
-        fseek(fp, (long)(mid * rec_size) * sizeof(double), SEEK_SET);
+        fseeko(fp, (off_t)mid * rec_size * sizeof(double), SEEK_SET);
         fread(&t, sizeof(double), 1, fp);
         if (t > t1) hi = mid - 1; else lo = mid;
     }
@@ -404,7 +403,7 @@ static gpointer loader_thread_fn(gpointer data) {
         g_mutex_unlock(&app->loader_lock);
         if (cancel) { free(ft); free(fd); free(buf); fclose(fp); return NULL; }
 
-        fseek(fp, (long)(i * rec_size) * sizeof(double), SEEK_SET);
+        fseeko(fp, (off_t)i * rec_size * sizeof(double), SEEK_SET);
         fread(buf, sizeof(double), rec_size, fp);
         ft[idx] = buf[0];
         for (int s = 0; s < nsig; s++)
@@ -413,7 +412,7 @@ static gpointer loader_thread_fn(gpointer data) {
     }
     /* always include the last record in the range (end_rec) */
     if (idx < n_out) {
-        fseek(fp, (long)(end_rec * rec_size) * sizeof(double), SEEK_SET);
+        fseeko(fp, (off_t)end_rec * rec_size * sizeof(double), SEEK_SET);
         fread(buf, sizeof(double), rec_size, fp);
         ft[idx] = buf[0];
         for (int s = 0; s < nsig; s++)
@@ -1032,42 +1031,6 @@ static void on_save_results(GtkMenuItem *item, App *app) {
                     }
                     fprintf(vf, "\n");
                 }
-            }
-        }
-
-        rewind(fp);
-        for (int r = 0; r < nrec; r++) {
-            if (fread(buf, sizeof(double), (size_t)(1 + nsig), fp) != (size_t)(1 + nsig)) break;
-            double t = buf[0];
-
-            if (df) {
-                fprintf(df, "%.6f", t);
-                for (int s = 0; s < a->n_signals; s++) {
-                    Signal *sig = &a->signals[s];
-                    if (sig->type == SIG_GEN_DELTA || sig->type == SIG_GEN_PE || sig->type == SIG_GEN_VT)
-                        fprintf(df, ",%.12g", buf[1 + s]);
-                }
-                fprintf(df, "\n");
-            }
-            if (vf) {
-                fprintf(vf, "%.6f", t);
-                for (int s = 0; s < a->n_signals; s++) {
-                    Signal *sig = &a->signals[s];
-                    if (sig->type == SIG_BUS_VM || sig->type == SIG_BUS_VA)
-                        fprintf(vf, ",%.12g", buf[1 + s]);
-                }
-                fprintf(vf, "\n");
-            }
-            if (ctw && ct_idx >= 0 && ct_sig_vm >= 0 && ct_sig_va >= 0) {
-                double Vm = buf[1+ct_sig_vm];
-                double ang = buf[1+ct_sig_va] * M_PI / 180.0;
-                double Vr = Vm * cos(ang), Vi = Vm * sin(ang);
-                double wr = 2.0 * M_PI * 60.0;
-                double va = Vr*cos(wr*t) - Vi*sin(wr*t);
-                double vb = Vr*cos(wr*t - 2.0943951024) - Vi*sin(wr*t - 2.0943951024);
-                double vc = Vr*cos(wr*t + 2.0943951024) - Vi*sin(wr*t + 2.0943951024);
-                double av[6] = {va, vb, vc, 0, 0, 0};
-                comtrade_write_ascii(ctw, t, av, NULL);
             }
         }
 
@@ -2645,8 +2608,7 @@ static void app_init(App *app) {
     app->ov_data = malloc(OV_SIZE * 2 * MAX_SIGNALS * sizeof(double));
     app->fr_t = NULL;
     app->fr_data = NULL;
-    for (int s = 0; s < MAX_SIGNALS; s++)
-        app->signals[s].data = calloc(PLOT_BUF, sizeof(double));
+
 }
 
 static void app_cleanup(App *app) {
@@ -2655,7 +2617,6 @@ static void app_cleanup(App *app) {
     plot_file_close(app);
     free(app->ov_t); free(app->ov_data);
     free(app->fr_t); free(app->fr_data);
-    for (int s = 0; s < MAX_SIGNALS; s++) free(app->signals[s].data);
     free(app->sys.machine_states);
     free(app->sys.colptr); free(app->sys.rowidx); free(app->sys.yval);
     arrfree(app->sys.machine); arrfree(app->sys.bus);

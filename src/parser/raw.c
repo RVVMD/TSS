@@ -101,7 +101,6 @@ int raw_parse(const char *filename, System *sys, Arena *a)
     /* --- Line 1: IC, SBASE, REV, ... --- */
     if (lb_getline(&lb, fp) < 0) { fclose(fp); return -1; }
     nt = tokenize(lb.data, tok, 40);
-    (void)nt; /* IC = tok[0], SBASE = tok[1] */
     if (nt >= 2) sys->base_mva = parse_dbl(tok[1]);
     else sys->base_mva = 100.0;
 

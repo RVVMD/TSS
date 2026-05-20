@@ -12,6 +12,12 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
+/* symmetrical-component rotation operators: a = e^(j*120°) */
+#define A2R  -0.5
+#define A2I  -0.8660254037844386
+#define AR   -0.5
+#define AI   0.8660254037844386
+
 static void usage(const char *prog)
 {
     printf(
@@ -292,10 +298,9 @@ int main(int argc, char **argv)
         int idx = (osc_idx >= 0) ? osc_idx : ct_idx;
         Vr_prev = y0[ndiff + 2*idx];
         Vi_prev = y0[ndiff + 2*idx + 1];
-        double a2r=-0.5, a2i=-0.86602540378, ar=-0.5, ai=0.86602540378;
         Va_pr = Vr_prev; Va_pi = Vi_prev;
-        Vb_pr = a2r*Vr_prev - a2i*Vi_prev; Vb_pi = a2r*Vi_prev + a2i*Vr_prev;
-        Vc_pr = ar*Vr_prev - ai*Vi_prev;   Vc_pi = ar*Vi_prev + ai*Vr_prev;
+        Vb_pr = A2R*Vr_prev - A2I*Vi_prev; Vb_pi = A2R*Vi_prev + A2I*Vr_prev;
+        Vc_pr = AR*Vr_prev - AI*Vi_prev;   Vc_pi = AR*Vi_prev + AI*Vr_prev;
     }
     if (ct_idx >= 0) {
         double *y0 = N_VGetArrayPointer(itg.nvec_y);
@@ -308,10 +313,9 @@ int main(int argc, char **argv)
             Ir_prev += Gij*Vr_j - Bij*Vi_j;
             Ii_prev += Gij*Vi_j + Bij*Vr_j;
         }
-        double a2r=-0.5, a2i=-0.86602540378, ar=-0.5, ai=0.86602540378;
         Ia_pr = Ir_prev; Ia_pi = Ii_prev;
-        Ib_pr = a2r*Ir_prev - a2i*Ii_prev; Ib_pi = a2r*Ii_prev + a2i*Ir_prev;
-        Ic_pr = ar*Ir_prev - ai*Ii_prev;   Ic_pi = ar*Ii_prev + ai*Ir_prev;
+        Ib_pr = A2R*Ir_prev - A2I*Ii_prev; Ib_pi = A2R*Ii_prev + A2I*Ir_prev;
+        Ic_pr = AR*Ir_prev - AI*Ii_prev;   Ic_pi = AR*Ii_prev + AI*Ir_prev;
     }
 
     log_info("Simulating: t_end=%.1f t_step=%.3f%s",

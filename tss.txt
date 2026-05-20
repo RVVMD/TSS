@@ -1,0 +1,1165 @@
+TSS — Transient Stability Simulator
+====================================
+
+Table of Contents
+  1. Overview & Architecture
+  2. Data Structures (src/types.h)
+  3. Arena Allocator (src/arena.c)
+  4. Stretchy Buffers (src/dynarray.c)
+  5. Logging (src/log.c)
+  6. Hash Map (src/hash.c)
+  7. PSS/E RAW Parser (src/parser/raw.c)
+  8. PSS/E DYR Parser (src/parser/dyr.c)
+  9. Event INI Parser (src/parser/ini.c)
+ 10. Y-Bus Builder (src/ybus.c)
+ 11. Power Flow Solver (src/powerflow.c)
+ 12. Machine Initialization (src/machine.c)
+ 13. DAE System (src/dae.c)
+ 14. SUNDIALS IDA Integrator (src/integrator.c)
+ 15. Events & Fault Application (src/events.c)
+ 16. Output Modules (csv.c, comtrade.c, output.c)
+ 17. CLI Entry Point (cli/main.c)
+ 18. GUI Entry Point (gui/gui.c)
+ 19. Build System (CMakeLists.txt, Makefile)
+ 20. Complete Data Flow (step-by-step)
+ 21. References & Dependencies
+
+
+1. Overview & Architecture
+--------------------------
+
+TSS is a transient stability simulator for electric power systems. It
+simulates the electromechanical dynamics of synchronous generators
+connected through a transmission network following disturbances such as
+faults, line switching, and load changes.
+
+The program is written in C11 and organized as a static library
+(libtransient.a) with two front-end executables:
+
+  - transient-cli : command-line interface with getopt argument parsing
+  - transient-gui : GTK+3 graphical interface with interactive plots
+
+The simulation core implements the classical GENCLS generator model
+(constant voltage behind transient reactance) with the swing equation,
+solved as a Differential-Algebraic Equation (DAE) system using
+SUNDIALS IDA (Implicit Differential-Algebraic solver). The network is
+solved in rectangular coordinates (Vr + jVi) with a CSC-sparse
+admittance matrix.
+
+
+2. Data Structures (src/types.h)
+---------------------------------
+
+types.h is the master header containing every data structure and public
+function declaration used across the entire project. The file is 232
+lines and includes SUNDIALS headers for the IDA solver types.
+
+2.1 Enums
+
+  BusType
+    BUS_PQ       = 1   Load bus (P and Q specified)
+    BUS_PV       = 2   Generator bus (P and V specified)
+    BUS_SLACK    = 3   Slack/reference bus
+    BUS_ISOLATED = 4   Disconnected bus
+
+  MachineModelType
+    GENCLS = 1   Classical generator (constant E' behind X'd)
+    GENROU = 2   Round-rotor detailed model (NOT implemented)
+    GENSAL = 3   Salient-pole detailed model (NOT implemented)
+
+  ExciterType
+    EXDC1  = 1   IEEE DC1 exciter (NOT implemented in sim)
+    IEEET1 = 2   IEEE T1 exciter (NOT implemented in sim)
+    EXST1  = 3   IEEE ST1 exciter (NOT implemented in sim)
+
+  GovernorType
+    TGOV1  = 1   Steam turbine-governor (NOT implemented)
+    IEEEG1 = 2   IEEE G1 governor (NOT implemented)
+    HYGOV  = 3   Hydro governor (NOT implemented)
+
+  EventType
+    FAULT       = 1   Three-phase balanced fault
+    LINE_OPEN   = 2   Open a transmission line
+    LINE_CLOSE  = 3   Close a transmission line (NOT implemented)
+    GEN_TRIP    = 4   Trip a generator (NOT implemented)
+    LOAD_SHED   = 5   Shed load (NOT implemented)
+    FAULT_CLEAR = 6   Clear all faults
+    FAULT_SLG   = 7   Single-line-to-ground fault
+    FAULT_LL    = 8   Line-to-line fault
+    FAULT_DLG   = 9   Double-line-to-ground fault
+    END_SIM     = 99  Stop simulation early
+
+  Fault phase codes (macros)
+    FAULT_PHASE_ABC = 0, AB=1, BC=2, CA=3, AG=4, BG=5, CG=6
+
+2.2 Core Structs
+
+  Arena
+    Simple bump allocator: { char *mem; size_t cap; size_t off; }
+
+  HMEntry / HashMap
+    Open-addressing hash map with linear probing and tombstones.
+    HMEntry = { int key; void *val; int occupied; int tombstone; }
+    HashMap = { HMEntry *buckets; size_t cap; size_t len; }
+
+  Bus
+    Power system bus/node:
+    { int id; BusType type; double base_kv, vm, va, pd, qd, gs, bs,
+      vmin, vmax; char name[16]; double gl, bl; }
+    gl and bl are the constant-Z load equivalents computed after power
+    flow: gl = Pd / V^2, bl = -Qd / V^2.
+
+  Branch
+    Transmission line or transformer:
+    { int id; int from, to; char ckt[3]; double r, x, b;
+      double rate_a, rate_b, rate_c; double tap, shift; int status; }
+    tap defaults to 1.0 (no transformer).
+    shift is the phase shift in degrees.
+
+  Gen
+    Generator:
+    { int id; int bus; double pg, qg; double mbase; double vsched;
+      int machine_idx; }
+    machine_idx is set by the DYR parser; -1 means no dynamic model.
+
+  Load
+    Static load:
+    { int id; int bus; double p, q; double ip, iq; double yp, yq;
+      int status; }
+
+  Machine
+    Dynamic generator model (GENCLS):
+    { int gen_idx; double h; double d; double xdp; double xq; double Ep; }
+    gen_idx indexes into sys->gen[]. h = inertia (MW·s/MVA).
+    d = damping coefficient. xdp = transient reactance (pu).
+    Ep = internal voltage magnitude (constant during simulation).
+
+  Event
+    Simulation event:
+    { EventType type; double time; int bus; int from, to;
+      double fault_r, fault_x; int fault_phase; }
+
+  System
+    The central state container for the entire power system:
+    { int nbus, nbranch, ngen, nload;
+      Bus *bus; Branch *branch; Gen *gen; Load *load;     (stretchy buffers)
+      int *colptr, *rowidx; int nnz; double *yval;         (CSC sparse Y-bus)
+      double base_mva;
+      int nmachines; Machine *machine; double *machine_states;
+      (fault state:)
+      int fault_bus; double fault_Y_r, fault_Y_i;
+      int fault_type, fault_phase;
+      double fault_Zth_r, fault_Zth_i; (Thevenin Z at fault bus)
+      double fault_Vth_r, fault_Vth_i; (Thevenin V at fault bus)
+      double fault_t0, fault_XoR, fault_clear_t; }
+
+    machine_states is an interleaved array:
+      [delta_0, omega_0, delta_1, omega_1, ... delta_{n-1}, omega_{n-1}]
+    where delta is in radians and omega = 1.0 pu at steady state (60 Hz).
+
+  DAE
+    Differential-Algebraic Equation descriptor:
+    { System *sys; int ndiff, nalg, neq;
+      int *jcolptr, *jrowidx; int jnnz; double *jval; }
+    ndiff = 2 * nmachines (delta, omega per machine)
+    nalg  = 2 * nbus (Vr, Vi per bus)
+    neq   = ndiff + nalg
+    The Jacobian sparsity pattern fields are currently unused (IDA uses
+    a dense Jacobian via SUNDenseMatrix).
+
+  Integrator
+    SUNDIALS IDA wrapper:
+    { void *ida_mem; SUNContext sunctx;
+      N_Vector nvec_y, nvec_ydot;
+      SUNMatrix sunmat_J; SUNLinearSolver sunls;
+      DAE *dae; int neq; }
+
+  CSVWriter
+    Simple CSV output helper:
+    { FILE *fp; int ncols; char **headers; }
+
+  ComtradeWriter / ComtradeAnalogCh / ComtradeDigitalCh
+    IEEE C37.111-1999 COMTRADE format writer.
+    ComtradeAnalogCh has index, id, phase, circuit, unit, a/b scaling,
+    min/max, primary/secondary, P/S flag.
+    ComtradeDigitalCh has index, id, phase, circuit.
+    ComtradeWriter contains arrays of analog and digital channel
+    definitions, station/device name, line frequency, sample rate,
+    total samples, file handles, and timestamps (start/trigger).
+
+
+3. Arena Allocator (src/arena.c)
+---------------------------------
+
+A simple bump allocator (31 lines):
+
+  Arena arena_new(size_t cap)
+    malloc(cap) for backing memory. cap=0 on error.
+
+  void *arena_alloc(Arena *a, size_t n)
+    8-byte aligned bump. Returns NULL if capacity exceeded.
+    Checks overflow: if n > SIZE_MAX-7, returns NULL.
+
+  void arena_free(Arena *a)
+    free(a->mem). Does NOT reset off to 0 after free (irrelevant).
+
+The CLI creates a 16 MB arena (1<<24) at startup. The GUI creates a
+fresh arena per simulation run. Individual frees are never needed;
+the entire arena is released at once. This is used for parser token
+buffers, power flow workspace, Jacobian workspace, etc.
+
+
+4. Stretchy Buffers (src/dynarray.c)
+-------------------------------------
+
+A header-only dynamic array implementation using macros (in types.h)
+with a single backing function:
+
+  void *_arrgrow(void *arr, size_t elem_sz)
+    On first call (arr==NULL), allocates a header (2 size_t) + 8 elements.
+    On subsequent calls, doubles capacity via realloc.
+    Overflow is checked: if newcap > SIZE_MAX/elem_sz, returns NULL.
+    Total allocation overflow is also checked.
+    After growth, increments length (header[0] += 1).
+    Returns pointer past the header (to element 0).
+
+  Macros:
+    arrlen(a)   -> header[-2] (number of elements)
+    arrcap(a)   -> header[-1] (capacity)
+    arrfree(a)  -> free header, set to NULL
+    arrpush(a, v) -> grow if full, append v
+    arrlast(a)  -> &a[arrlen(a)-1]
+
+Used throughout for: sys->bus[], sys->branch[], sys->gen[], sys->load[],
+sys->machine[], events[], Y-bus triplet array, etc.
+
+
+5. Logging (src/log.c)
+-----------------------
+
+Three thread-safe (localtime_r) logging functions:
+
+  void log_info(const char *fmt, ...)   -> "[HH:MM:SS] INFO  message"
+  void log_warn(const char *fmt, ...)   -> "[HH:MM:SS] WARN  message"
+  void log_error(const char *fmt, ...)  -> "[HH:MM:SS] ERROR message"
+
+All output to stderr. Uses localtime_r for thread safety (required by
+the GUI which runs simulation in a separate thread).
+
+
+6. Hash Map (src/hash.c)
+-------------------------
+
+A generic int-to-void* hash map with open addressing:
+
+  Data structures (defined in types.h):
+    HMEntry: { int key; void *val; int occupied; int tombstone; }
+    HashMap: { HMEntry *buckets; size_t cap; size_t len; }
+
+  Parameters:
+    Initial capacity: 16
+    Load factor: 0.75 (growth at 75% full)
+    Growth: 2x (rehash all entries)
+
+  Hash function: SplitMix32
+    x ^= x >> 16; x *= 0x45d9f3b;
+    x ^= x >> 16; x *= 0x45d9f3b;
+    x ^= x >> 16;
+
+  Probing: linear (idx + i) & (cap-1), cap always power of 2.
+
+  Tombstone strategy:
+    On remove: mark entry tombstone=1, decrement len
+    On lookup: skip tombstones (treat as occupied for chain continuity)
+    On insert: reuse first tombstone found (for_insert flag)
+    On resize: rehash only non-tombstone entries
+
+  Functions:
+    hashmap_new()     -> create with init_cap=16
+    hashmap_free(m)   -> free buckets + struct
+    hashmap_get(m, k) -> lookup, returns NULL if not found
+    hashmap_put(m,k,v)-> insert/update, auto-resize
+    hashmap_remove(m,k)-> mark tombstone
+
+  hm_find_slot(): single function for both lookup and insert. The
+  for_insert parameter causes it to prefer returning a tombstone slot
+  (which terminates probing early) vs. an empty slot at end of chain.
+
+  NOT currently used in the main simulation code path. Available as a
+  utility for future use (e.g., bus-ID-to-index lookup).
+
+
+7. PSS/E RAW Parser (src/parser/raw.c)
+---------------------------------------
+
+Reads PSS/E v33 RAW format (232 lines):
+
+  Line buffer (arena-backed):
+    LineBuf: { char *data; size_t len; size_t cap; }
+    lb_new(a): allocates 4096 bytes from arena
+    lb_getline(&lb, fp): reads one line, returns 0 on success, -1 on EOF
+
+  Tokenizer:
+    tokenize(line, tokens, nmax):
+      Splits on commas. Handles single-quoted fields (strips quotes).
+      Strips trailing whitespace from unquoted tokens.
+      Returns token count.
+
+  Section terminator detection:
+    is_term(line): returns 1 if line starts with "0" followed by optional
+    whitespace/commas and optionally a '/' comment.
+
+  Parser flow (raw_parse):
+    1. Opens file, reads line 1 -> base_mva (field 1, default 100)
+    2. Reads 2 comment lines (lines 2-3)
+    3. Bus loop: until "0" terminator
+       Fields: id, name, base_kv, type, area, zone, owner, Vm, Va,
+               Pd, Qd, Vmax, Vmin
+       Type mapping: 1->PQ, 2->PV, 3->SLACK, else->ISOLATED
+       Va converted from degrees to radians
+       Pd/Qd converted to per-unit by /base_mva
+       name is NA if not provided
+    4. Load loop (optional section): bus_id, load_id, status markers,
+       P(MW), Q(MVar)
+    5. Generator loop: bus_id, gen_id, Pg, Qg, ..., mbase, vsched
+       mbase defaults to 100 if not given
+       machine_idx set to -1 initially
+    6. Branch loop: from, to, ckt, R, X, B, rate_a/b/c, ..., tap, shift
+       tap defaults to 1.0
+       status defaults to 1 (ON)
+    7. Ignores the final "0" / "Q" terminator section
+
+  Writer (raw_write):
+    Exports the network back to RAW format. Used by the GUI for
+    "Save RAW" functionality.
+
+  Validation: minimum field counts are enforced for each section.
+  All angles are stored internally in radians (converted from degrees
+  on input, converted back on output).
+
+
+8. PSS/E DYR Parser (src/parser/dyr.c)
+---------------------------------------
+
+Reads PSS/E DYR dynamics file (144 lines):
+
+  Uses an almost-identical line buffer and tokenizer as the RAW parser.
+
+  Parser flow (dyr_parse):
+    1. Reads lines with format: bus_id, 'GENCLS', machine_id, H, D, Xdp
+    2. For each line, finds the generator at that bus (matching bus_id
+       via bus[gen[i].bus].id), creates a Machine struct.
+    3. Sets gen->machine_idx = machine_index
+    4. Defaults: H=5.0, D=0.0, Xdp=0.1 if not provided in file
+    5. If no machines found in the entire file, creates defaults for
+       all generators with H=5, D=0, Xdp=0.1 with a warning.
+
+  Writer (dyr_write):
+    Exports machine data back to DYR format. Used by the GUI.
+
+  Note: only GENCLS model is supported; other model type names in the
+  DYR file are parsed but ignored.
+
+
+9. Event INI Parser (src/parser/ini.c)
+---------------------------------------
+
+Parses simple INI-format event scripts (93 lines):
+
+  Format:
+    [event]
+    type = fault|3ph|ABC|slg|AG|BG|CG|ll|LL|AB|BC|CA|dlg|DLG|ABG|BCG|CAG
+           |line-open|clear|end
+    time = <seconds>
+    bus  = <bus-ID>
+    from = <bus-ID>  (for line events)
+    to   = <bus-ID>
+    r    = <fault resistance in pu>
+    x    = <fault reactance in pu>
+    phase = AB|BC|CA|AG|BG|CG|ABC
+
+  Comments start with # or ;. Blank lines are skipped.
+  Section names ([...]) are ignored (not validated); each section
+  creates one Event.
+
+  Multiple aliases for fault types are accepted:
+    fault/3ph/ABC -> FAULT (three-phase)
+    slg/AG/BG/CG  -> FAULT_SLG (single-line-to-ground)
+    ll/LL/AB/BC/CA -> FAULT_LL (line-to-line)
+    dlg/DLG/ABG/BCG/CAG -> FAULT_DLG (double-line-to-ground)
+    line-open     -> LINE_OPEN
+    clear         -> FAULT_CLEAR
+    end           -> END_SIM
+
+  The events array is built using the arrpush() stretchy buffer.
+
+
+10. Y-Bus Builder (src/ybus.c)
+-------------------------------
+
+Builds the network admittance matrix in Compressed Sparse Column (CSC)
+format (135 lines):
+
+  ybus_build(System *sys, Arena *a):
+    1. Initializes diagonal with bus shunt admittance (gs, bs)
+    2. If sys->fault_bus >= 0, adds fault shunt at that bus diagonal
+    3. For each branch (if status==1):
+       - Computes series admittance: g = r/(r^2+x^2), b = -x/(r^2+x^2)
+       - If series impedance is near-zero (r=x=0), uses g=1e8
+       - Charging susceptance b/2 is split equally between from and to
+       - For transformers (|tap-1|>1e-6 or |shift|>1e-6):
+         Complex tap T = tap * e^(j*phi) where phi = shift * pi/180
+         Diagonal at from-bus includes /|T|^2
+         Off-diagonal mutual terms are adjusted: -(g+j*b) / conj(T) and
+         -(g+j*b) / T
+       - For lines (tap=1, shift=0): standard pi-model
+    4. Triplets (Trip {r, c, re, im}) collected in a stretchy buffer
+    5. Sorted by (col, row) using selection sort (2 nested loops over
+       ntrips — acceptable for the small number of branches in typical
+       power systems)
+    6. Duplicates are summed (same row,col from multiple branches or
+       coincident with existing diagonal entries)
+    7. Free old CSC arrays (colptr, rowidx, yval) if they exist
+    8. Build CSC structure: colptr[n+1], rowidx[nnz], yval[2*nnz]
+       (interleaved real/imaginary). Uses a colfill[] counter for
+       correct placement.
+    9. Stores in sys->colptr, sys->rowidx, sys->yval, sys->nnz
+
+  The CSC format is:
+    For column j, elements are at indices colptr[j]..colptr[j+1]-1
+    in rowidx[] and yval[]. yval[2k] = G_ij, yval[2k+1] = B_ij.
+    The matrix is structurally symmetric (if branch i-j exists, both
+    (i,j) and (j,i) entries are present).
+
+
+11. Power Flow Solver (src/powerflow.c)
+----------------------------------------
+
+Newton-Raphson power flow in polar coordinates (128 lines):
+
+  Helper functions:
+    calc_P(i, sys):
+      P_i = V_i * sum_j V_j * (G_ij*cos(theta_i-theta_j)
+                               + B_ij*sin(theta_i-theta_j))
+    calc_Q(i, sys):
+      Q_i = V_i * sum_j V_j * (G_ij*sin(theta_i-theta_j)
+                               - B_ij*cos(theta_i-theta_j))
+
+    Both create the full power injection at bus i from the whole Y-bus.
+
+  powerflow_solve(System *sys, Arena *a):
+    1. Identify slack bus, count PV buses (npv) and PQ buses (npq)
+    2. Build unknown vector of size nu = npv + 2*npq:
+       - For each PV bus: dtheta (1 unknown)
+       - For each PQ bus: dtheta, dVm (2 unknowns)
+       This is tracked by uq_bus[] (bus index) and uq_isV[]
+       (0=theta, 1=Vm).
+    3. Allocate J (nu*nu), F (nu), x (nu) from arena
+    4. Iteration loop (max 20):
+       a. Compute P_calc and Q_calc for all buses
+       b. Build mismatch vector F:
+          F[u] = P_sched - P_calc (for theta vars)
+          F[u] = Q_sched - Q_calc (for Vm vars)
+          P_sched/Q_sched includes generator injections minus load.
+       c. Check convergence: max|F| < 1e-8
+       d. Build Jacobian by finite differences (eps=1e-7):
+          Column v: perturb bus[v] theta or Vm by eps, re-evaluate
+          all P/Q, compute (F_perturbed - F_base) / eps
+       e. Solve J * dx = -F via LAPACKE_dgesv (dense LU, column-major)
+       f. Update unknowns: bus[i].va += dx[v] or bus[i].vm += dx[v]
+    5. If not converged after 20 iterations, log error and return -1.
+
+  Note: The Jacobian is built using finite differences rather than
+  analytical formulas. This is simpler but less efficient. The dense
+  linear solver from LAPACK is used (not sparse), so systems with
+  more than ~1000 buses would be slow.
+
+
+12. Machine Initialization (src/machine.c)
+-------------------------------------------
+
+Computes the initial internal states of all synchronous machines from
+the power flow solution (38 lines):
+
+  machine_init(System *sys):
+    1. Allocate sys->machine_states = 2 * nmachines doubles
+    2. For each machine m:
+       - Get terminal voltage V = Vm * e^(j*Va) from power flow
+       - Compute generator current I = (P + jQ) / conj(V):
+         Ir = (P*Vr + Q*Vi) / V^2
+         Ii = (P*Vi - Q*Vr) / V^2
+       - Compute internal voltage behind X'd:
+         E = V - j*X'd * I   ->   Er = Vr + X'd*Ii, Ei = Vi - X'd*Ir
+       - Set Ep = |E| (constant for the simulation)
+       - Set delta = angle(E) = atan2(Ei, Er)
+       - Set omega = 1.0 (steady-state synchronous speed)
+
+  This implements the classical GENCLS initialization. The internal
+  voltage magnitude Ep remains constant throughout the simulation;
+  only the angle delta changes according to the swing equation.
+
+
+13. DAE System (src/dae.c)
+---------------------------
+
+Defines the Differential-Algebraic Equation system (108 lines):
+
+  Indexing macros:
+    YDIFF(m)  = 2*m                    delta for machine m
+    YOMEGA(m) = 2*m + 1                omega for machine m
+    YVR(i)    = ndiff + 2*i            Vr for bus i
+    YVI(i)    = ndiff + 2*i + 1        Vi for bus i
+    Y_G(k)    = sys->yval[2*k]         G_ij from Y-bus
+    Y_B(k)    = sys->yval[2*k+1]       B_ij from Y-bus
+
+  dae_init(DAE *dae, System *sys, Arena *a):
+    Sets ndiff=2*nmachines, nalg=2*nbus, neq=ndiff+nalg.
+    Initializes fault state to "no fault".
+
+  dae_residual(t, yy, yp, rr, user_data):
+    The core function called by SUNDIALS IDA. Computes
+    rr = F(t, y, yp). Returns 0 on success.
+
+    Differential equations (for each machine m):
+      delta_m, omega_m = y[YDIFF(m)], y[YOMEGA(m)]
+      Vr, Vi = y[YVR(gen.bus)], y[YVI(gen.bus)]
+      Ep = mc->Ep (constant)
+      xdp_inv = 1.0 / mc->xdp (with zero-division guard)
+      dVr = Ep*cos(delta)-Vr, dVi = Ep*sin(delta)-Vi
+      Pe = Vr*(dVi*xdp_inv) + Vi*(-dVr*xdp_inv)
+      r[delta_m] = ydot[delta_m] - ws*(omega-1)
+      r[omega_m] = (2H/ws)*ydot[omega_m] - (Pm - Pe - D*(omega-1))
+
+      where ws = 2*pi*60, Pm = gen->pg, H = mc->h, D = mc->d
+
+    Algebraic equations (for each bus i):
+      Vr, Vi = y[YVR(i)], y[YVI(i)]
+
+      Generator currents:
+        Ir += sum over machines at this bus: dVi / xdp
+        Ii += sum: -dVr / xdp
+
+      Load currents (constant-Z model):
+        gl, bl from bus->gl, bus->bl (computed after power flow)
+        Ir -= gl*Vr - bl*Vi
+        Ii -= bl*Vr + gl*Vi
+
+      Network current YV:
+        YVr = sum over Y-bus column i: G_ij*Vr_j - B_ij*Vi_j
+        YVi = sum: B_ij*Vr_j + G_ij*Vi_j
+
+      Residual:
+        r[YVR(i)] = YVr - Ir
+        if bus is slack: r[YVI(i)] = y[YVI(i)]   (fix Vi=0)
+        else:            r[YVI(i)] = YVi - Ii
+
+  The slack bus constraint enforces that Vi=0 at the slack bus, which
+  fixes the reference angle (aligning the real axis with the slack bus
+  voltage phasor).
+
+
+14. SUNDIALS IDA Integrator (src/integrator.c)
+-----------------------------------------------
+
+Wrapper around the SUNDIALS IDA DAE solver (118 lines):
+
+  integrator_init(Integrator *itg, DAE *dae, double t0):
+    1. Create SUNContext with MPI_COMM_WORLD
+    2. Create serial N_Vectors for y and ydot (size neq)
+    3. Initialize y:
+       - First ndiff entries: machine_states (delta, omega)
+       - Last 2*nbus entries: Vr = Vm*cos(Va), Vi = Vm*sin(Va)
+    4. Set ydot = 0
+    5. Create IDA solver: IDACreate -> IDASetMaxOrd(1) -> IDAInit
+    6. Set user data (DAE pointer), tolerances (rtol=1e-4, atol=1e-6),
+       max steps (500k)
+    7. Set differential/algebraic ID vector: 1 for first ndiff vars,
+       0 for nalg vars
+    8. Create SUNDenseMatrix and SUNLinSol_Dense
+    9. Attach linear solver: IDASetLinearSolver
+    10. IDACalcIC (initial condition correction, using 0.01 as hunt factor)
+        This adjusts y and ydot to satisfy the algebraic constraints
+        at t=0. Allows up to 0.01s of "hunting" for initialization.
+
+  integrator_step(itg, tout, tret):
+    Calls IDASolve with IDA_NORMAL. Returns IDA return code.
+
+  integrator_free(itg):
+    Destroys nvec_y, nvec_ydot, sunls, sunmat_J, ida_mem, sunctx in
+    proper order.
+
+  Error handler:
+    SUNDIALS errors are redirected to log_warn via a custom error
+    handler. This prevents SUNDIALS from printing to stderr directly.
+
+  Configuration notes:
+    - BDF order 1 (backward Euler) is used for stability with stiff
+      systems.
+    - Dense Jacobian is used regardless of problem size (acceptable for
+      typical systems with <1000 buses).
+    - IDACalcIC may return warnings (nonzero but non-fatal) which are
+      logged but do not prevent continuation.
+
+
+15. Events & Fault Application (src/events.c)
+----------------------------------------------
+
+Handles simulation events and computes post-event states (247 lines):
+
+  thevenin(const System *sys, int bi, ...):
+    Computes Thevenin equivalent impedance at fault bus bi:
+    1. Extract diagonal of Y-bus at bi: G_ii + jB_ii
+    2. Add generator shunt: -1/xdp for each machine at this bus
+       (machine current injection = (E - V) / (j*xdp))
+    3. Add load shunt: gl + j*bl (constant-Z)
+    4. Zth = 1 / Y_ii (where Y_ii is the augmented diagonal)
+    5. Vth is assumed as 1.0 + j0 (nominal pre-fault voltage)
+
+  fault_shunt(Zth_r, Zth_i, Zf_r, Zf_i, ftype, ...):
+    Computes the effective positive-sequence fault shunt admittance
+    for different fault types. Uses simplified sequence network
+    combinations:
+      ftype=0 (3-phase): Y = 1/Zf
+      ftype=1 (SLG): Z_eq = 2*Zth + 3*Zf, Y = 1/Z_eq
+        (assumes Z1=Z2=Z0)
+      ftype=2 (LL): Z_eq = Zth + Zf, Y = 1/Z_eq
+      ftype=3 (DLG): Z_eq = Zth||(Zth+3*Zf) + Zf, Y = 1/Z_eq
+
+  events_apply(System *sys, Event *ev, double t):
+    Dispatches based on ev->type:
+      FAULT/FAULT_SLG/FAULT_LL/FAULT_DLG:
+        - Validate bus exists
+        - Ensure fault impedance is nonzero
+        - Compute Thevenin impedance at fault bus
+        - Store fault type, phase, Zth, Vth, start time, X/R ratio
+        - Compute and store fault shunt admittance
+        - Log the event
+      FAULT_CLEAR:
+        - Record clear time
+        - Reset fault_bus=-1, fault_type=0, fault_phase=0
+        - Log the event
+      LINE_OPEN:
+        - Match (from, to) bidirectional
+        - Set branch status = 0
+      LINE_CLOSE/GEN_TRIP/LOAD_SHED:
+        - Log "not implemented" warning
+
+  events_post_state(const System *sys, const double *delta, double *V_out):
+    Called after a topological change (fault/clearing) to compute the
+    new consistent bus voltages.
+
+    1. Build dense G and B matrices from CSC Y-bus (converts sparse
+       to dense for the linear solve)
+    2. Add generator shunt (-1/xdp) to B diagonal
+    3. Add load shunts (gl, bl) to diagonal
+    4. Build 2N x 2N real matrix A in block form:
+         [ G   -B ]
+         [ B    G ]
+       (each block is N x N)
+    5. Build RHS from machine injection currents:
+         I_gen_i = Ep*sin(delta_m) / xdp (real part)
+         I_gen_i = -Ep*cos(delta_m) / xdp (imag part)
+    6. Enforce slack bus constraint: zero out row for Vi_slack,
+       set diagonal to 1, RHS[slack_vi] = 0
+    7. Solve A * V = RHS via LAPACKE_dgesv (dense LU, row-major)
+    8. Copy result to V_out
+
+    This is a full linear system solve that computes the new
+    quasi-steady-state bus voltages after the network change, assuming
+    machine internal voltages (Ep and delta) remain constant during
+    the instant of the event (as per the classical model assumption).
+
+
+16. Output Modules
+-------------------
+
+16.1 CSV Writer (src/csv.c, 39 lines)
+
+  csv_open(path, ncols, headers):
+    Opens file "w", optionally writes header line (comma-separated).
+    Returns CSVWriter* or NULL on failure.
+
+  csv_row(w, t, data):
+    Writes: "t,data[0],data[1],...,data[ncols-1]\n"
+    t formatted as %.6f, data as %.12g.
+
+  csv_close(w):
+    Closes file, frees writer struct.
+
+  Used by the CLI for delta.csv and voltage.csv output. The GUI
+  writes these files directly via fprintf in its export function.
+
+16.2 COMTRADE Writer (src/comtrade.c, 195 lines)
+
+  Implements IEEE C37.111-1999 COMTRADE format for digital fault
+  recorder data exchange.
+
+  comtrade_create(station, device):
+    Creates writer with station/device names, rev_year=1999,
+    line_freq=50 (note: should be 60 for the US, but global variable),
+    sample_rate=1000, fmt=ASCII. Sets start/trigger timestamps from
+    current system time (gmtime_r, thread-safe).
+
+  comtrade_set_time(w, ...):
+    Overrides the start and trigger timestamps.
+
+  comtrade_add_analog(w, id, phase, circuit, unit, a, b,
+                      min, max, primary, secondary, ps):
+    Adds an analog channel. Channel array grows dynamically
+    (realloc, doubles capacity starting at 16).
+
+  comtrade_add_digital(w, id, phase, circuit):
+    Adds a digital channel (same growth pattern).
+
+  comtrade_write_cfg(w, path):
+    Writes the CFG (configuration) file:
+      - Station, device, revision year
+      - Total channels (analog A + digital D)
+      - Per-channel: index, ID, phase, circuit, unit, a/b scaling,
+        0, min, max, primary, secondary, P/S flag
+        (a = scaling factor from per-unit to engineering units,
+         b = offset, always 0 here)
+      - Line frequency
+      - Number of sample rates (1)
+      - Sample rate and total samples
+      - Start timestamp: DD/MM/YYYY,HH:MM:SS.us
+      - Trigger timestamp: same format
+      - File format (ASCII or BINARY)
+      - Time factor (for rev_year >= 1999)
+
+  comtrade_open_dat(w, path):
+    Opens DAT file for writing, resets sample counter.
+
+  comtrade_write_ascii(w, timestamp, analog_vals, digital_vals):
+    Writes one data sample:
+      "sample_num, timestamp_us, val0, val1, ..., d0, d1, ...\n"
+    Timestamp is converted to microseconds.
+    Analog values are clamped to [min, max] range.
+    Digital values default to 0 if NULL.
+
+  comtrade_close(w):
+    Closes DAT file, frees channel arrays, frees writer.
+
+  Scaling factors:
+    comtrade_v_factor(base_kv) = base_kv * sqrt(2/3)
+      Peak line-to-neutral voltage factor.
+    comtrade_i_factor(base_mva, base_kv) = base_mva * sqrt(2) /
+                                           (sqrt(3) * base_kv)
+      Peak current factor.
+
+  The a (scaling) factor converts per-unit simulation values to
+  engineering units (kV and kA). For example, if the per-unit voltage
+  is 1.0 and base_kv = 345, then the secondary value (what the
+  "relay" sees) = 1.0 * a = 1.0 * 345*sqrt(2/3) = 281.7 kV peak
+  line-to-neutral.
+
+16.3 Network Output (src/output.c, 211 lines)
+
+  bus_type_name(t):
+    Returns string "PQ", "PV", "SLACK", "ISOL", or "?".
+
+  print_network_info(sys):
+    Prints a detailed topology report to stdout:
+      - Base MVA
+      - Buses: ID, name, type, kV, V(pu), angle(deg), Pd(MW),
+        Qd(MVar), attached generators
+      - Branches: from/to bus IDs, ckt, R, X, B, tap, status
+      - Generators: ID, bus, Pg, Qg, mbase, vsched
+      - Dynamic machines: index, bus, model, H, D, X'd
+      - Loads: ID, bus, P, Q
+
+  print_network_dot(sys, path):
+    Exports Graphviz DOT file:
+      - Bus nodes colored by type: red=SLACK, lightblue=PV,
+        lightyellow=PQ, grey=ISOLATED
+      - Generator boxes (green) dashed-connected to their bus
+      - Branch edges labeled with R+jX, bold+blue for transformers
+
+  print_network_diagram(sys):
+    ASCII art one-line diagram using Unicode box-drawing:
+      - Slack: '⊚', PV: '◎', PQ: '○'
+      - Generators: '⚡', Loads: '⎌'
+      - Branches as tree-like connections with R and X values
+      - Legend at bottom
+
+
+17. CLI Entry Point (cli/main.c)
+---------------------------------
+
+The command-line interface (722 lines). Compiled as transient-cli.
+
+  Usage: transient-cli --raw FILE --dyr FILE [OPTIONS]
+
+  Command-line options:
+    --raw FILE        PSS/E RAW file (required)
+    --dyr FILE        PSS/E DYR file (required)
+    --events FILE     Event script (INI format)
+    --t-end SEC       Simulation duration, default 10.0 s
+    --t-step SEC      Output interval, default 0.01 s
+    --output DIR      Output directory, default ./results
+    --osc BUS         3-phase oscillogram at 1 kHz for bus
+    --comtrade BUS    IEEE C37.111 COMTRADE export for bus
+    --plot            Generate gnuplot PNGs (requires gnuplot)
+    --res WxH         Plot resolution, default 2400x1600
+    --real-time       Sync simulation to wall clock
+    --info            Print topology and exit
+    --diagram         Print ASCII one-line diagram and exit
+    --topo FILE       Export Graphviz DOT graph and exit
+
+  Main flow:
+    1. MPI_Init (required by SUNDIALS, even in single-process mode)
+    2. Parse options via getopt_long
+    3. Create 16 MB arena
+    4. Parse RAW + DYR files
+    5. If --info/--diagram/--topo: print/export and exit
+    6. Build Y-bus
+    7. Power flow solve
+    8. Machine init (initial states from power flow)
+    9. Compute constant-Z load shunts: gl = Pd/V^2, bl = -Qd/V^2
+    10. Parse events file (if provided)
+    11. DAE init
+    12. Integrator init (t=0)
+    13. Create output directory
+    14. Open CSV files (delta.csv, voltage.csv), write headers
+    15. If oscillogram requested: open osc_bus{N}.csv, find bus index
+    16. If COMTRADE requested: create writer with 6 analog channels
+        (Va, Vb, Vc, Ia, Ib, Ic) and scaling factors
+    17. Initialize phasor tracking for osc/comtrade (Vr, Vi at t=0,
+        symmetrical component calculation)
+    18. Main simulation loop (see Section 20 for detailed flow)
+    19. Close output files, write COMTRADE CFG
+    20. If --plot: generate gnuplot scripts and run system(gnuplot ...)
+    21. Print post-simulation summary (voltage/gen statistics)
+    22. Free all resources, MPI_Finalize
+
+  Post-simulation summary shows:
+    - Bus voltage: min, max, avg per bus
+    - Generator: min/max delta, omega, electrical power
+
+  The progress bar is printed to stderr:
+    [======>                       ]  21.3% t=2.13s
+  In real-time mode, it also shows live V for first 5 buses and
+  angle for first 4 generators, and syncs with wall clock via
+  usleep().
+
+  Symmetrical component rotation (rotate_3ph):
+    Rotates Va/Vb/Vc or Ia/Ib/Ic phasors based on fault phase
+    (AB, BC, CA, AG, BG, CG). Used both in the osc/comtrade output
+    and duplicated in the GUI export code.
+
+  NOTE: The 3-phase oscillogram and COMTRADE generation interpolates
+  between simulation time steps at 1 kHz using linear interpolation
+  of phasors. It reconstructs phase voltages from positive/negative/
+  zero sequence components based on the fault type, and adds DC
+  offset (exponential decay after fault inception) and inrush
+  harmonics (3rd + 5th harmonic after fault clearing).
+
+
+18. GUI Entry Point (gui/gui.c)
+--------------------------------
+
+The graphical interface (2704 lines). Compiled as transient-gui.
+
+  Built with GTK+3. Uses Cairo for plot rendering. The simulation
+  runs in a separate thread.
+
+  App struct (the global application state):
+    System sys, Arena arena, sys_loaded flag
+    GUIEvent events[MAX_EVENTS] (fixed-size array of 64)
+    Plot data: PLOT_BUF circular buffer (65536 points), binary file
+               /tmp/tss_plot.dat
+    Overview cache: ov_t/ov_data (16384 bucketed points)
+    Full-resolution cache: fr_t/fr_data (loaded on-demand per zoom)
+    Loader thread management
+    Viewport settings (view_t0, view_t1)
+    Mouse interaction (drag-to-zoom)
+    Simulation parameters (t_end, t_step)
+    Simulation thread + mutex + progress
+    GTK widgets (window, trees, plot area, signal tree, etc.)
+
+  SignalType enum:
+    SIG_GEN_DELTA, SIG_GEN_PE, SIG_GEN_OMEGA, SIG_GEN_VT,
+    SIG_BUS_VM, SIG_BUS_VA, SIG_OSC_VA, SIG_OSC_VB, SIG_OSC_VC
+
+  GUI Layout:
+    ┌──────────────────────────────────────────────────────────┐
+    │ Menu: File | Simulation                                   │
+    ├──────────────────────┬───────────────────────────────────┤
+    │ NETWORK (notebook)   │ SIMULATION CONTROLS               │
+    │  ┌─Buses───────────┐│ [Run] [Stop]  t_end: [10.0]       │
+    │  │ ID | Name | ... ││ t_step: [0.01]                    │
+    │  └─────────────────┘│ [===========] 45.2%               │
+    │  ┌─Branches────────┐│ [Zoom+] [Zoom-] [Fit] [All] [N]  │
+    │  │ ...              ││ View: 0.000 -- 5.000 s           │
+    │  └─────────────────┘│                                    │
+    │  ┌─Generators──────┐│ [Cairo Plot Area]                 │
+    │  │ ...              ││ (interactive zoom/pan)            │
+    │  └─────────────────┘│                                    │
+    │  ┌─Loads───────────┐│ SIGNALS (tree with checkboxes)    │
+    │  │ ...              ││ ☐ Generator @ Bus 1              │
+    │  └─────────────────┘│   ☐ G1 δ (rad)                   │
+    ├──────────────────────┤   ☐ G1 Pe (pu)                   │
+    │ EVENTS (list)        │ ☐ Bus 1                          │
+    │ [event1 at 1.0s]     │   ☐ B1 Vm (pu)                   │
+    │ (click to select)    │   ☐ B1 angle (deg)               │
+    ├──────────────────────┴───────────────────────────────────┤
+    │ Status: Simulation complete                              │
+    └──────────────────────────────────────────────────────────┘
+
+  Key functions:
+
+    plot_push(app, t, gen arrays, bus arrays, osc values):
+      Writes one record to /tmp/tss_plot.dat:
+        [t, signal_0, signal_1, ..., signal_{n-1}]
+      Increments plot_n_records.
+
+    plot_clear(app):
+      Opens /tmp/tss_plot.dat for binary writing (truncate).
+      Resets counters and caches.
+
+    plot_file_close(app):
+      Closes file, cancels loader, removes /tmp/tss_plot.dat,
+      frees cache arrays.
+
+    plot_build_overview(app):
+      Reads plot file, creates bucketed min/max averages:
+        - Total records divided into ~8000 buckets
+        - Within each bucket, subsamples at stride/10
+        - Stores average of min+max per bucket
+        - Result: ov_t[ov_len], ov_data[ov_len * nsig]
+
+    loader_thread_fn(app):
+      Background thread that loads full-resolution data for the
+      current zoom range:
+        - Binary search for start and end records in time range
+        - Stride-samples to max 2*plot_width points
+        - Always includes the last record
+        - Checks loader_cancel flag for responsiveness
+        - On completion, updates fr_t/fr_data and triggers redraw
+
+    on_draw_plot(cairo drawing):
+      - Dark background (#1f1f29 = RGB 0.12, 0.12, 0.16)
+      - Uses overview or full-res cache depending on zoom
+      - Grid lines at 5 divisions
+      - Axis labels (adaptive precision)
+      - 24 predefined colors cycling
+      - Legend drawn in top-right corner
+
+    sim_run(app):
+      1. Save current network to /tmp/tss_sim_PID.raw/.dyr
+      2. Create simulation arena (16 MB)
+      3. Re-parse RAW/DYR, rebuild Y-bus, power flow, machine init
+      4. Set up DAE/integrator
+      5. Launch sim_thread_fn in new thread
+      6. Set up progress timer (100 ms interval)
+
+    sim_thread_fn(data):
+      Runs the actual simulation (identical core loop to CLI):
+        - Creates binary plot file via plot_clear
+        - Writes data at each output step via plot_push
+        - Updates app->sim_progress and app->sim_status under mutex
+        - Checks app->sim_running for cancellation
+      After loop:
+        - Calls plot_build_overview
+        - Starts loader thread for initial full view
+        - Sets sim_done flag
+
+    Export Results dialog:
+      - Checkboxes for CSV and COMTRADE export
+      - Output directory chooser
+      - Bus selector for COMTRADE
+      Opens plot file, reads all records, writes to CSV files and/or
+      COMTRADE format.
+
+    Network editing:
+      - Bus/Branch/Generator/Load lists are editable GTK TreeViews
+      - Right-click context menus: Add, Delete, Save RAW, Save DYR
+      - Double-click cells to edit values inline
+      - Combo cells for enums (bus type, branch status, etc.)
+
+    Signal tree:
+      Built by build_signal_tree(app) after loading RAW+DYR:
+        - Generators with child signals (delta, Pe, omega, Vt)
+        - Buses with child signals (Vm, angle)
+        - Scope bus (if set) with child signals (Va, Vb, Vc)
+      Parent-child checkbox sync (checking parent checks all children)
+
+    Plot interaction:
+      - Drag-to-zoom: click and drag to select time range
+      - Scroll wheel: zoom in/out around cursor position
+      - Zoom In/Out buttons: 0.35/0.75 of current span
+      - Fit button: reset to full simulation duration
+      - All/None buttons: toggle all signal visibility
+
+  The GUI re-implements the entire simulation pipeline (parsing,
+  power flow, integration) rather than calling the CLI. This means
+  both the CLI and GUI share the same library but each has its own
+  entry point and output handling.
+
+  Important: When the user clicks "Run", the current editable network
+  is first serialized to temp RAW/DYR files, then re-parsed by the
+  simulation thread. This ensures the simulation always runs on the
+  latest edited state.
+
+
+19. Build System
+-----------------
+
+  Top-level CMakeLists.txt:
+    cmake_minimum_required(VERSION 3.20)
+    project(tss C)
+    CMAKE_C_STANDARD 11
+    Debug flags: -g -O0 -Wall -Wextra -fsanitize=address
+    Release flags: -O3 -march=native -DNDEBUG
+    Subdirectories: src, tests
+
+  src/CMakeLists.txt:
+    Dependencies:
+      MPI (required for SUNDIALS)
+      GTK+3 (via pkg-config, for GUI only)
+      SUNDIALS: sundials_ida, sundials_core, sundials_nvecserial
+      SuiteSparse: klu (included but not used — code uses LAPACK)
+      LAPACKE (dense linear algebra)
+      Math library (-lm)
+
+    Library target: transient (STATIC) from 14 source files
+      arena.c, dynarray.c, hash.c, csv.c, log.c
+      parser/raw.c, parser/dyr.c, parser/ini.c
+      ybus.c, powerflow.c, machine.c, dae.c, integrator.c
+      events.c, comtrade.c, output.c
+
+    Include paths: src/, MPI, /usr/include/suitesparse, GTK3
+
+    Executables:
+      transient-cli (cli/main.c) -> links transient + MPI
+      transient-gui (gui/gui.c)  -> links transient + MPI + GTK3
+
+  tests/CMakeLists.txt:
+    test_ybus executable from tests/test_ybus.c, links transient + MPI
+
+  Developer Makefile:
+    make build  -> cmake + make
+    make test   -> mpirun -np 1 build/tests/test_ybus
+    make run    -> fault simulation with --plot on IEEE 14-bus
+    make sim    -> steady-state simulation (no events)
+    make clean  -> remove build/ and results/
+
+  The test file tests/test_ybus.c runs an integration test:
+    1. Parse ieee14.raw and ieee14.dyr
+    2. Build Y-bus (expect 54 non-zeros)
+    3. Power flow (check convergence)
+    4. Machine init
+    5. DAE init (expect 38 equations: 10 diff + 28 alg)
+    6. Compute residual (check norm)
+    7. Integrator init (IDACalcIC)
+    8. Integrate to t=1.0
+
+  Both make run and make sim target the 14-bus test case. make run
+  applies a 3-phase fault at bus 4 (from fault_ieee14.ini), while
+  make sim runs without events.
+
+
+20. Complete Data Flow
+-----------------------
+
+Initialization:
+
+  1. Arena arena = arena_new(1<<24)
+  2. System sys = {0}
+  3. raw_parse(raw_file, &sys, &arena)
+       Reads PSS/E RAW file, populates sys.bus[], .branch[], .gen[],
+       .load[], .nbus, .nbranch, .ngen, .nload, .base_mva
+  4. dyr_parse(dyr_file, &sys, &arena)
+       Reads PSS/E DYR file, populates sys.machine[], sets
+       gen->machine_idx, sys.nmachines. Falls back to defaults if
+       no machines defined.
+  5. ybus_build(&sys, &arena)
+       Builds CSC Y-bus: sys.colptr[], sys.rowidx[], sys.yval[],
+       sys.nnz
+  6. powerflow_solve(&sys, &arena)
+       Newton-Raphson, updates sys.bus[].vm, .va
+  7. machine_init(&sys)
+       Computes Ep, delta, omega for each machine, stores in
+       sys.machine_states[] and mc->Ep
+  8. For each bus: compute gl = Pd/V^2, bl = -Qd/V^2 (constant-Z load)
+  9. events_parse(events_file, &evlist, &arena)
+       Reads event INI file, populates Event[] array
+  10. dae_init(&dae, &sys, &arena)
+        Sets ndiff=2*nmach, nalg=2*nbus, neq=ndiff+nalg
+  11. integrator_init(&itg, &dae, t0=0.0)
+        Creates SUNContext, N_Vectors, IDA solver, sets up dense
+        linear solver, calls IDACalcIC
+
+Simulation Loop:
+
+  while (t < t_end):
+    a. tout = min(t_next, t_end)
+    b. Scan events for next event time before tout
+    c. IDASolve(ida_mem, tout, &tret, y, yp, IDA_NORMAL)
+       -> Integrates DAE one step to tret
+    d. t = tret
+    e. Fire events at current t:
+       - events_apply(&sys, &event, t)
+       - If fault applied/cleared:
+         * ybus_build(&sys, &arena) with new fault shunt
+         * events_post_state(&sys, ydata, Vtmp)
+            (solves dense linear system for new bus voltages)
+         * Update ydata[Vr, Vi] from Vtmp
+         * Compute new yp (swing equation)
+         * IDAReInit(ida_mem, t, y, yp)
+    f. Output at sample points:
+       - Read y from integrator
+       - Write voltage.csv: t, Vm, angle for each bus
+       - Write delta.csv: t, delta, Pe, Vt for each machine
+       - If oscillogram/COMTRADE:
+         * Linear-interpolate between t_prev and t at 1 kHz
+         * Compute 3-phase voltages from phasor (symmetrical
+           components + DC offset + harmonics)
+         * Write to osc_bus{N}.csv or COMTRADE writer
+       - Save phasors for next interpolation step
+    g. t_next += t_step
+    h. Update progress bar
+    i. If real-time: sync to wall clock via usleep
+
+Post-Simulation:
+
+  - Close CSV files
+  - Write COMTRADE CFG file (if applicable)
+  - Generate gnuplot scripts and run gnuplot (if --plot)
+  - Print simulation summary (voltage/gen extremes)
+  - Integrator free
+  - DAE free
+  - Free sys.machine_states, colptr, rowidx, yval
+  - arrfree all arrays
+  - Arena free
+  - MPI_Finalize
+
+
+21. References & Dependencies
+-----------------------------
+
+  External libraries:
+    - SUNDIALS IDA (6.x): Implicit Differential-Algebraic solver
+      https://computing.llnl.gov/projects/sundials/ida
+      libs: sundials_ida, sundials_core, sundials_nvecserial
+    - LAPACKE: Dense linear algebra (LU solve, dgesv)
+      https://www.netlib.org/lapack/lapacke.html
+    - SuiteSparse KLU: Included but unused; intended for future
+      sparse Jacobian support.
+    - MPI: Message Passing Interface (required by SUNDIALS even in
+      single-process mode)
+    - GTK+3: GUI toolkit (version 3.0+)
+    - Cairo: 2D graphics library (used via GTK's Cairo context)
+    - Math library: -lm
+
+  Input formats:
+    - PSS/E RAW v33: Power system network data exchange format
+      (IEEE standard for power flow data)
+    - PSS/E DYR: Dynamics data format (machine parameters)
+    - INI-based event scripts (custom format)
+
+  Output formats:
+    - CSV: Comma-separated time-series (delta and voltage)
+    - IEEE C37.111-1999 COMTRADE: Digital fault recorder format
+    - Graphviz DOT: Network topology graph
+    - PNG via gnuplot: Time-domain plots
